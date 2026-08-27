@@ -21,16 +21,17 @@ $env:OPENROUTER_API_KEY = (input --suppress-output "OpenRouter API key: ")
 cargo run -- run --ticks 20 --llm-model openai/gpt-5-mini --llm-url https://openrouter.ai/api/v1 --llm-api-key-env OPENROUTER_API_KEY --llm-temperature 0.3 --llm-reasoning-effort medium --llm-max-tokens 1024 --llm-provider Anthropic
 ```
 
-OpenCode Go (using one of its Chat Completions models):
+OpenCode Go (Chat Completions or Responses):
 
 ```nu
 $env:OPENCODE_GO_API_KEY = (input --suppress-output "OpenCode Go API key: ")
 cargo run -- run --ticks 1 --llm-model kimi-k3 --llm-url https://opencode.ai/zen/go/v1 --llm-api-key-env OPENCODE_GO_API_KEY
+cargo run -- run --ticks 1 --llm-model gpt-5.6-luna --llm-url https://opencode.ai/zen/go/v1 --llm-api responses --llm-api-key-env OPENCODE_GO_API_KEY
 ```
 
 `--database` atomically stores a resumable checkpoint containing the world's metadata, agents, locations, memories, and ordered events. `--resume PATH` validates and continues that checkpoint, then atomically updates it; combine it with `--database OTHER_PATH` to write elsewhere. `inspect` remains read-only.
 
-`--llm-model` selects an OpenAI-compatible Chat Completions server at `http://localhost:11434/v1` by default; override it with `--llm-url`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. `--llm-temperature` accepts `0` through `2` (default `0`), `--llm-reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, and `--llm-max-tokens` sets `max_completion_tokens`. OpenRouter's `--llm-provider` pins requests to one provider and disables provider fallbacks. Optional fields are omitted unless configured; model support varies. LLM action outcomes print immediately as each response arrives. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
+`--llm-model` selects an OpenAI-compatible server at `http://localhost:11434/v1` by default; override it with `--llm-url`. `--llm-api chat` is the default and uses `/chat/completions`; `--llm-api responses` uses `/responses`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. `--llm-temperature` accepts `0` through `2` (default `0`), `--llm-reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, and `--llm-max-tokens` sets `max_completion_tokens` for Chat Completions or `max_output_tokens` for Responses. OpenRouter's `--llm-provider` pins requests to one provider and disables provider fallbacks. Optional fields are omitted unless configured; model support varies. LLM action outcomes print immediately as each response arrives. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
 
 ## Validate
 

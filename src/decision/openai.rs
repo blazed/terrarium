@@ -34,6 +34,25 @@ pub struct OpenAiDecisionEngine {
     reasoning_effort: Option<ReasoningEffort>,
     max_completion_tokens: Option<u32>,
     provider: Option<String>,
+    api: OpenAiApi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiApi {
+    ChatCompletions,
+    Responses,
+}
+
+impl std::str::FromStr for OpenAiApi {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "chat" => Ok(Self::ChatCompletions),
+            "responses" => Ok(Self::Responses),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -71,6 +90,15 @@ impl OpenAiDecisionEngine {
         model: impl Into<String>,
         timeout: Duration,
     ) -> Result<Self, DecisionError> {
+        Self::new_with_api(base_url, model, timeout, OpenAiApi::ChatCompletions)
+    }
+
+    pub fn new_with_api(
+        base_url: &str,
+        model: impl Into<String>,
+        timeout: Duration,
+        api: OpenAiApi,
+    ) -> Result<Self, DecisionError> {
         let mut endpoint = Url::parse(base_url)
             .map_err(|error| DecisionError::Configuration(error.to_string()))?;
         if endpoint.scheme() != "https" && (endpoint.scheme() != "http" || !is_loopback(&endpoint))
@@ -79,14 +107,22 @@ impl OpenAiDecisionEngine {
                 "endpoint must use HTTPS, or HTTP on a loopback address".into(),
             ));
         }
-        if !endpoint
+        let suffix = match api {
+            OpenAiApi::ChatCompletions => "chat/completions",
+            OpenAiApi::Responses => "responses",
+        };
+        let base_path = endpoint
             .path()
             .trim_end_matches('/')
-            .ends_with("/chat/completions")
-        {
-            let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
-            endpoint.set_path(&path);
-        }
+            .strip_suffix("/chat/completions")
+            .or_else(|| {
+                endpoint
+                    .path()
+                    .trim_end_matches('/')
+                    .strip_suffix("/responses")
+            })
+            .unwrap_or_else(|| endpoint.path().trim_end_matches('/'));
+        endpoint.set_path(&format!("{base_path}/{suffix}"));
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         let model = model.into();
@@ -105,6 +141,7 @@ impl OpenAiDecisionEngine {
             reasoning_effort: None,
             max_completion_tokens: None,
             provider: None,
+            api,
         })
     }
 
@@ -161,44 +198,76 @@ impl DecisionEngine for OpenAiDecisionEngine {
         &mut self,
         observation: &AgentObservation,
     ) -> Result<ProposedAction, DecisionError> {
-        let request = ChatRequest {
-            model: &self.model,
-            messages: [
-                ChatMessage {
-                    role: "system",
-                    content: SYSTEM_PROMPT.into(),
-                },
-                ChatMessage {
-                    role: "user",
-                    content: serde_json::to_string(observation)?,
-                },
-            ],
-            temperature: self.temperature,
-            reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
-            max_completion_tokens: self.max_completion_tokens,
-            provider: self.provider.as_deref().map(|provider| ProviderRouting {
-                order: [provider],
-                allow_fallbacks: false,
-            }),
-        };
+        let input = serde_json::to_string(observation)?;
+        let provider = self.provider.as_deref().map(|provider| ProviderRouting {
+            order: [provider],
+            allow_fallbacks: false,
+        });
         let mut request_builder = self.client.post(self.endpoint.clone());
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
         }
-        let response: ChatResponse = request_builder
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(DecisionError::MissingChoice)?
-            .message
-            .content;
+        let content = match self.api {
+            OpenAiApi::ChatCompletions => {
+                let request = ChatRequest {
+                    model: &self.model,
+                    messages: [
+                        ChatMessage {
+                            role: "system",
+                            content: SYSTEM_PROMPT.into(),
+                        },
+                        ChatMessage {
+                            role: "user",
+                            content: input,
+                        },
+                    ],
+                    temperature: self.temperature,
+                    reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
+                    max_completion_tokens: self.max_completion_tokens,
+                    provider,
+                };
+                request_builder
+                    .json(&request)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<ChatResponse>()
+                    .await?
+                    .choices
+                    .into_iter()
+                    .next()
+                    .ok_or(DecisionError::MissingChoice)?
+                    .message
+                    .content
+            }
+            OpenAiApi::Responses => {
+                let request = ResponsesRequest {
+                    model: &self.model,
+                    instructions: SYSTEM_PROMPT,
+                    input,
+                    temperature: self.temperature,
+                    reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
+                    max_output_tokens: self.max_completion_tokens,
+                    provider,
+                };
+                request_builder
+                    .json(&request)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<ResponsesResponse>()
+                    .await?
+                    .output
+                    .into_iter()
+                    .flat_map(|item| item.content)
+                    .find_map(|content| {
+                        (content.kind == "output_text")
+                            .then_some(content.text)
+                            .flatten()
+                    })
+                    .ok_or(DecisionError::MissingChoice)?
+            }
+        };
         let action = serde_json::from_str(content.trim())?;
         if !action_is_afforded(observation, &action) {
             return Err(DecisionError::UnavailableAction);
@@ -248,6 +317,20 @@ struct ChatRequest<'a> {
 }
 
 #[derive(Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    instructions: &'static str,
+    input: String,
+    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderRouting<'a>>,
+}
+
+#[derive(Serialize)]
 struct ProviderRouting<'a> {
     order: [&'a str; 1],
     allow_fallbacks: bool,
@@ -270,6 +353,25 @@ struct ChatResponse {
 }
 
 #[derive(Deserialize)]
+struct ResponsesResponse {
+    output: Vec<ResponseOutput>,
+}
+
+#[derive(Deserialize)]
+struct ResponseOutput {
+    #[serde(default)]
+    content: Vec<ResponseContent>,
+}
+
+#[derive(Deserialize)]
+struct ResponseContent {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Choice {
     message: ResponseMessage,
 }
@@ -282,7 +384,8 @@ struct ResponseMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMessage, ChatRequest, OpenAiDecisionEngine, ReasoningEffort, action_is_afforded,
+        ChatMessage, ChatRequest, OpenAiApi, OpenAiDecisionEngine, ReasoningEffort,
+        action_is_afforded,
     };
     use crate::{
         cognition::perceive,
@@ -388,6 +491,48 @@ mod tests {
             world.execute(actor, action),
             ActionResult::Success(_)
         ));
+        server.join().expect("server");
+    }
+
+    #[tokio::test]
+    async fn responses_api_uses_its_request_and_response_shapes() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+            assert!(request.contains(r#""instructions":"You choose one action"#));
+            assert!(request.contains(r#""input":"{\"tick\""#));
+            assert!(request.contains(r#""max_output_tokens":256"#));
+            assert!(!request.contains("max_completion_tokens"));
+            let body = r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"eat\"}"}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("response");
+        });
+
+        let world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let observation = perceive(&world, actor).expect("observation");
+        let mut engine = OpenAiDecisionEngine::new_with_api(
+            &format!("http://{address}/v1"),
+            "test-model",
+            Duration::from_secs(2),
+            OpenAiApi::Responses,
+        )
+        .expect("engine")
+        .with_max_completion_tokens(256)
+        .expect("token limit");
+
+        assert_eq!(
+            engine.decide(&observation).await.expect("action"),
+            ProposedAction::Eat
+        );
         server.join().expect("server");
     }
 

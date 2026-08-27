@@ -10,7 +10,7 @@ pub enum DecisionError {
     Http(#[from] reqwest::Error),
     #[error("decision-engine JSON was invalid: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("decision-engine response contained no choice")]
+    #[error("decision-engine response contained no action output")]
     MissingChoice,
     #[error("decision engine proposed an action outside the current affordances")]
     UnavailableAction,
