@@ -10,9 +10,11 @@ pub use action::{
     ActionRejection, ActionResult, DialogueTone, MAX_TALK_MESSAGE_CHARS, ObservationTarget,
     ProposedAction,
 };
-pub use agent::{Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality};
+pub use agent::{
+    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality,
+};
 pub use event::{Event, EventKind};
-pub use location::Location;
+pub use location::{Location, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
 pub use world::{World, WorldError};
@@ -39,6 +41,8 @@ macro_rules! domain_id {
 domain_id!(AgentId);
 domain_id!(LocationId);
 domain_id!(EventId);
+
+pub const NEW_WORLD_START_HOUR: u64 = 7;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

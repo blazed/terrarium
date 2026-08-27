@@ -73,6 +73,8 @@ pub enum ActionRejection {
         current: LocationId,
         target: LocationId,
     },
+    #[error("location {0} is closed")]
+    LocationClosed(LocationId),
     #[error("agent cannot eat at location {0}")]
     CannotEatHere(LocationId),
     #[error("agent cannot rest at location {0}")]

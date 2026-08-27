@@ -1,7 +1,8 @@
 use super::{
-    ActionRejection, ActionResult, Agent, AgentId, DialogueTone, Event, EventId, EventKind, Goal,
-    GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS, Needs, ObservationTarget, Occupation,
-    Personality, ProposedAction, Relationship, Tick, seeded_uuid,
+    ActionRejection, ActionResult, Activity, Agent, AgentId, DialogueTone, Event, EventId,
+    EventKind, Goal, GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR,
+    Needs, ObservationTarget, Occupation, OpeningHours, Personality, ProposedAction, Relationship,
+    Tick, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,6 +62,25 @@ impl World {
                             name,
                             "The Crooked Lantern" | "Mara's Bakery" | "General Store"
                         ),
+                        opening_hours: match name {
+                            "The Crooked Lantern" => Some(OpeningHours {
+                                opens_at_hour: 12,
+                                closes_at_hour: 23,
+                            }),
+                            "Mara's Bakery" => Some(OpeningHours {
+                                opens_at_hour: 6,
+                                closes_at_hour: 14,
+                            }),
+                            "Old Chapel" => Some(OpeningHours {
+                                opens_at_hour: 6,
+                                closes_at_hour: 20,
+                            }),
+                            "Riverside Houses" => None,
+                            _ => Some(OpeningHours {
+                                opens_at_hour: 8,
+                                closes_at_hour: 18,
+                            }),
+                        },
                         connected: BTreeSet::new(),
                         agents: BTreeSet::new(),
                     },
@@ -138,6 +158,7 @@ impl World {
                     status: vary_need(0.35),
                     energy: vary_need(0.8),
                 },
+                activity: None,
                 mood: 0.0,
                 relationships: BTreeMap::new(),
                 beliefs: BTreeMap::new(),
@@ -177,7 +198,7 @@ impl World {
         let world = Self {
             name: "Briar Glen".into(),
             seed,
-            tick: Tick(0),
+            tick: Tick(NEW_WORLD_START_HOUR * 60 / Tick::MINUTES),
             agents,
             locations,
             events: Vec::new(),
@@ -198,6 +219,14 @@ impl World {
             agent.needs.decay(elapsed);
             agent.decay_mood(elapsed);
             agent.decay_beliefs(elapsed);
+            let urgent =
+                agent.needs.food < 0.1 || agent.needs.energy < 0.1 || agent.needs.safety < 0.1;
+            if agent
+                .activity
+                .is_some_and(|activity| activity.until <= proposed || urgent)
+            {
+                agent.activity = None;
+            }
         }
         self.tick = proposed;
         Ok(())
@@ -339,6 +368,13 @@ impl World {
                         },
                     );
                 }
+                if !destination_location.is_open(self.tick.hour()) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::LocationClosed(destination),
+                    );
+                }
                 debug_assert!(!destination_location.agents.contains(&actor));
                 if let Some(source) = self.locations.get_mut(&current) {
                     source.agents.remove(&actor);
@@ -470,11 +506,19 @@ impl World {
                 }
             }
             ProposedAction::Eat => {
-                if current != agent.home && !self.locations[&current].serves_food {
+                let location = &self.locations[&current];
+                if current != agent.home && !location.serves_food {
                     return self.reject(
                         actor,
                         Some(current),
                         ActionRejection::CannotEatHere(current),
+                    );
+                }
+                if current != agent.home && !location.is_open(self.tick.hour()) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::LocationClosed(current),
                     );
                 }
                 EventKind::Ate { agent: actor }
@@ -497,12 +541,11 @@ impl World {
                         ActionRejection::CannotWorkHere(current),
                     );
                 }
-                let hour = self.tick.hour();
-                if !(8..18).contains(&hour) {
+                if !self.locations[&current].is_open(self.tick.hour()) {
                     return self.reject(
                         actor,
                         Some(current),
-                        ActionRejection::OutsideWorkingHours(hour),
+                        ActionRejection::LocationClosed(current),
                     );
                 }
                 EventKind::Worked { agent: actor }
@@ -511,6 +554,15 @@ impl World {
         };
 
         self.apply_action_effects(actor, &kind);
+        if let Some(activity) = Activity::from_event(&kind, self.tick) {
+            self.agents.get_mut(&actor).expect("known actor").activity = Some(activity);
+            if let EventKind::Spoke { listener, .. } = &kind {
+                self.agents
+                    .get_mut(listener)
+                    .expect("validated listener")
+                    .activity = Some(activity);
+            }
+        }
         let completed_goal = self.advance_goal(actor, &kind);
         let mut events = vec![self.append_event(Some(current), kind)];
         if let Some(goal) = completed_goal {
@@ -738,6 +790,14 @@ impl World {
 
     pub fn validate(&self) -> Result<(), WorldError> {
         for (id, location) in &self.locations {
+            if location
+                .opening_hours
+                .is_some_and(|hours| !hours.is_valid())
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "location {id} has invalid opening hours"
+                )));
+            }
             for connected in &location.connected {
                 let other = self
                     .locations
@@ -785,6 +845,14 @@ impl World {
                     "agent {id} has non-normalized traits"
                 )));
             }
+            if agent
+                .activity
+                .is_some_and(|activity| activity.until <= self.tick)
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has an expired activity"
+                )));
+            }
             if agent.relationships.iter().any(|(target, relationship)| {
                 target == id || !self.agents.contains_key(target) || !relationship.is_normalized()
             }) {
@@ -819,9 +887,11 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, AgentId, DialogueTone, EventKind, MAX_TALK_MESSAGE_CHARS,
-        ObservationTarget, ProposedAction, Relationship, Tick, World, WorldError,
+        ActionRejection, ActionResult, Activity, AgentId, DialogueTone, EventKind,
+        MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction, Relationship, Tick, World,
+        WorldError,
     };
+    use crate::sim::ActivityKind;
     use uuid::Uuid;
 
     #[test]
@@ -843,14 +913,57 @@ mod tests {
     #[test]
     fn tick_only_moves_forward() {
         let mut world = World::briar_glen(1).expect("town should construct");
-        world.advance_to(Tick(2)).expect("forward tick");
+        let start = world.tick;
+        world.advance_to(Tick(start.0 + 2)).expect("forward tick");
         assert_eq!(
-            world.advance_to(Tick(1)),
+            world.advance_to(Tick(start.0 + 1)),
             Err(WorldError::NonMonotonicTick {
-                current: Tick(2),
-                proposed: Tick(1),
+                current: Tick(start.0 + 2),
+                proposed: Tick(start.0 + 1),
             })
         );
+    }
+
+    #[test]
+    fn activities_last_until_completion_and_urgent_needs_interrupt_them() {
+        let mut world = World::briar_glen(2).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let start = world.tick;
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.needs.food = 1.0;
+        agent.needs.energy = 1.0;
+        agent.needs.safety = 1.0;
+
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Work),
+            ActionResult::Rejected(ActionRejection::CannotWorkHere(_))
+        ));
+        assert_eq!(world.agents[&actor].activity, None);
+
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Eat),
+            ActionResult::Success(_)
+        ));
+        assert_eq!(
+            world.agents[&actor].activity,
+            Some(Activity {
+                kind: ActivityKind::Eating,
+                until: Tick(start.0 + 3),
+            })
+        );
+        world.advance_to(Tick(start.0 + 2)).expect("activity time");
+        assert!(world.agents[&actor].activity.is_some());
+        world.advance_to(Tick(start.0 + 3)).expect("completion");
+        assert_eq!(world.agents[&actor].activity, None);
+
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.activity = Some(Activity {
+            kind: ActivityKind::Working,
+            until: Tick(start.0 + 15),
+        });
+        agent.needs.food = 0.05;
+        world.advance_tick().expect("interruption");
+        assert_eq!(world.agents[&actor].activity, None);
     }
 
     #[test]
@@ -921,7 +1034,9 @@ mod tests {
         );
         assert!((world.agents[&actor].mood - 0.17).abs() < f32::EPSILON * 4.0);
 
-        world.advance_to(Tick(10)).expect("time advances");
+        world
+            .advance_to(Tick(world.tick.0 + 10))
+            .expect("time advances");
         assert!((world.agents[&actor].mood - 0.15).abs() < f32::EPSILON * 4.0);
         world.validate().expect("bounded mood");
         world.agents.get_mut(&actor).expect("actor").mood = 1.1;
@@ -982,6 +1097,14 @@ mod tests {
 
         world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1.1;
         assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+
+        world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1.0;
+        let home = world.agents[&actor].home;
+        world.locations.get_mut(&home).expect("home").opening_hours = Some(super::OpeningHours {
+            opens_at_hour: 18,
+            closes_at_hour: 8,
+        });
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 
     #[test]
@@ -1027,7 +1150,7 @@ mod tests {
         world.advance_to(Tick(18 * 12)).expect("evening");
         assert_eq!(
             world.execute(actor, ProposedAction::Work),
-            ActionResult::Rejected(ActionRejection::OutsideWorkingHours(18))
+            ActionResult::Rejected(ActionRejection::LocationClosed(workplace))
         );
     }
 
@@ -1044,6 +1167,49 @@ mod tests {
     }
 
     #[test]
+    fn closed_locations_reject_entry_and_activity_but_allow_departure() {
+        let mut world = World::briar_glen(4).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let home = world.agents[&actor].home;
+        let tavern = world
+            .locations
+            .values()
+            .find(|location| location.name == "The Crooked Lantern")
+            .map(|location| location.id)
+            .expect("tavern");
+
+        assert_eq!(
+            world.execute(
+                actor,
+                ProposedAction::Move {
+                    destination: tavern,
+                }
+            ),
+            ActionResult::Rejected(ActionRejection::LocationClosed(tavern))
+        );
+
+        world.advance_to(Tick(12 * 12)).expect("opening time");
+        assert!(matches!(
+            world.execute(
+                actor,
+                ProposedAction::Move {
+                    destination: tavern,
+                }
+            ),
+            ActionResult::Success(_)
+        ));
+        world.advance_to(Tick(23 * 12)).expect("closing time");
+        assert_eq!(
+            world.execute(actor, ProposedAction::Eat),
+            ActionResult::Rejected(ActionRejection::LocationClosed(tavern))
+        );
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Move { destination: home }),
+            ActionResult::Success(_)
+        ));
+    }
+
+    #[test]
     fn movement_updates_both_sides_and_records_an_event() {
         let mut world = World::briar_glen(4).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
@@ -1051,8 +1217,8 @@ mod tests {
         let destination = *world.locations[&from]
             .connected
             .iter()
-            .next()
-            .expect("connected location");
+            .find(|id| world.locations[id].is_open(world.tick.hour()))
+            .expect("open connected location");
 
         assert!(matches!(
             world.execute(actor, ProposedAction::Move { destination }),
@@ -1078,8 +1244,8 @@ mod tests {
         let destination = *world.locations[&home]
             .connected
             .iter()
-            .next()
-            .expect("destination");
+            .find(|id| world.locations[id].is_open(world.tick.hour()))
+            .expect("open destination");
         world.execute(remote, ProposedAction::Move { destination });
         for agent in world.agents.values_mut() {
             agent.memories.clear();
@@ -1117,7 +1283,9 @@ mod tests {
         let belief = world.agents[&listener].beliefs[&speaker];
         assert!(belief.reliability > 0.5);
         assert_eq!(belief.confidence, 0.3);
-        world.advance_to(Tick(10)).expect("time advances");
+        world
+            .advance_to(Tick(world.tick.0 + 10))
+            .expect("time advances");
         assert!((world.agents[&listener].beliefs[&speaker].confidence - 0.29).abs() < f32::EPSILON);
         world.validate().expect("valid beliefs");
 
@@ -1414,8 +1582,8 @@ mod tests {
         let destination = *world.locations[&from]
             .connected
             .iter()
-            .next()
-            .expect("connected location");
+            .find(|id| world.locations[id].is_open(world.tick.hour()))
+            .expect("open connected location");
         assert!(matches!(
             world.execute(target, ProposedAction::Move { destination }),
             ActionResult::Success(_)
@@ -1437,6 +1605,7 @@ mod tests {
     fn event_log_keeps_insertion_order() {
         let mut world = World::briar_glen(8).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let start = world.tick.0;
         world.advance_tick().expect("tick");
         world.execute(actor, ProposedAction::Wait);
         world.advance_tick().expect("tick");
@@ -1448,7 +1617,7 @@ mod tests {
                 .iter()
                 .map(|event| event.tick)
                 .collect::<Vec<_>>(),
-            vec![Tick(1), Tick(2)]
+            vec![Tick(start + 1), Tick(start + 2)]
         );
         assert_ne!(world.events()[0].id, world.events()[1].id);
     }

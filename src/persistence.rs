@@ -212,6 +212,7 @@ mod tests {
         );
         assert_eq!(stored.events, world.events());
         assert!(stored.agents.iter().any(|agent| !agent.memories.is_empty()));
+        assert!(stored.agents.iter().any(|agent| agent.activity.is_some()));
         fs::remove_file(path).expect("cleanup");
     }
 

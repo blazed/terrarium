@@ -1,6 +1,6 @@
 use super::{AgentId, World};
 
-/// Gives one resident a turn per tick, rotating in stable ID order.
+/// Gives one idle resident a turn per tick, rotating in stable ID order.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Scheduler;
 
@@ -11,9 +11,10 @@ impl Scheduler {
         }
         world
             .agents
-            .keys()
+            .values()
             .nth(world.tick.0 as usize % world.agents.len())
-            .copied()
+            .filter(|agent| agent.activity.is_none())
+            .map(|agent| agent.id)
             .into_iter()
             .collect()
     }
@@ -22,7 +23,19 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::Scheduler;
-    use crate::sim::World;
+    use crate::sim::{Activity, ActivityKind, Tick, World};
+
+    #[test]
+    fn busy_residents_do_not_receive_turns() {
+        let mut world = World::briar_glen(22).expect("town");
+        let scheduler = Scheduler;
+        let actor = scheduler.agents_to_act(&world)[0];
+        world.agents.get_mut(&actor).expect("resident").activity = Some(Activity {
+            kind: ActivityKind::Resting,
+            until: Tick(world.tick.0 + 12),
+        });
+        assert!(scheduler.agents_to_act(&world).is_empty());
+    }
 
     #[test]
     fn thousands_of_ticks_schedule_reproducibly() {

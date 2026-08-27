@@ -1,4 +1,4 @@
-use super::{AgentId, Event, LocationId, Relationship};
+use super::{AgentId, Event, EventKind, LocationId, Relationship, Tick};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
@@ -170,6 +170,43 @@ impl Belief {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Travelling,
+    Conversing,
+    Observing,
+    Eating,
+    Resting,
+    Working,
+    Waiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    pub kind: ActivityKind,
+    pub until: Tick,
+}
+
+impl Activity {
+    pub(super) fn from_event(event: &EventKind, now: Tick) -> Option<Self> {
+        let (kind, duration) = match event {
+            EventKind::Moved { .. } => (ActivityKind::Travelling, 2),
+            EventKind::Spoke { .. } => (ActivityKind::Conversing, 3),
+            EventKind::Observed { .. } => (ActivityKind::Observing, 1),
+            EventKind::Ate { .. } => (ActivityKind::Eating, 3),
+            EventKind::Rested { .. } => (ActivityKind::Resting, 12),
+            EventKind::Worked { .. } => (ActivityKind::Working, 12),
+            EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
+            EventKind::GoalCompleted { .. } | EventKind::ActionRejected { .. } => return None,
+        };
+        Some(Self {
+            kind,
+            until: Tick(now.0.checked_add(duration)?),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
@@ -181,6 +218,8 @@ pub struct Agent {
     pub location: LocationId,
     pub personality: Personality,
     pub needs: Needs,
+    #[serde(default)]
+    pub activity: Option<Activity>,
     #[serde(default)]
     pub mood: f32,
     pub relationships: BTreeMap<AgentId, Relationship>,
@@ -246,9 +285,11 @@ mod tests {
         let mut value = serde_json::to_value(world.agents.values().next().expect("resident"))
             .expect("agent JSON");
         let object = value.as_object_mut().expect("agent object");
+        object.remove("activity");
         object.remove("mood");
         object.remove("beliefs");
         let agent: Agent = serde_json::from_value(value).expect("legacy agent");
+        assert_eq!(agent.activity, None);
         assert_eq!(agent.mood, 0.0);
         assert!(agent.beliefs.is_empty());
     }

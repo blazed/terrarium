@@ -1,20 +1,39 @@
 use crate::sim::{
-    AgentId, Belief, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget, Occupation,
-    Personality, Relationship, Tick, World,
+    Activity, AgentId, Belief, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget,
+    Occupation, OpeningHours, Personality, Relationship, Tick, World,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentObservation {
     pub tick: Tick,
+    pub local_time: LocalTime,
     pub self_description: SelfDescription,
     pub current_location: LocationDescription,
     pub visible_agents: Vec<VisibleAgent>,
+    pub action_affordances: ActionAffordances,
+    pub route_hints: RouteHints,
     pub goals: Vec<GoalStatus>,
     pub relevant_memories: Vec<String>,
     pub beliefs: BTreeMap<AgentId, Belief>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionAffordances {
+    pub move_to: Vec<LocationId>,
+    pub talk_to: Vec<AgentId>,
+    pub can_eat: bool,
+    pub can_rest: bool,
+    pub can_work: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteHints {
+    pub home: Option<LocationId>,
+    pub workplace: Option<LocationId>,
+    pub food: Option<LocationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,6 +41,13 @@ pub struct GoalStatus {
     pub description: String,
     pub kind: GoalKind,
     pub progress: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTime {
+    pub day: u64,
+    pub hour: u64,
+    pub minute: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,8 +58,10 @@ pub struct SelfDescription {
     pub occupation: Occupation,
     pub home: LocationSummary,
     pub workplace: Option<LocationSummary>,
+    pub work_hours: Option<OpeningHours>,
     pub personality: Personality,
     pub needs: Needs,
+    pub activity: Option<Activity>,
     pub mood: f32,
 }
 
@@ -42,6 +70,8 @@ pub struct LocationDescription {
     pub id: LocationId,
     pub name: String,
     pub serves_food: bool,
+    pub opening_hours: Option<OpeningHours>,
+    pub is_open: bool,
     pub connected: Vec<LocationSummary>,
 }
 
@@ -50,6 +80,8 @@ pub struct LocationSummary {
     pub id: LocationId,
     pub name: String,
     pub serves_food: bool,
+    pub opening_hours: Option<OpeningHours>,
+    pub is_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +89,7 @@ pub struct VisibleAgent {
     pub id: AgentId,
     pub name: String,
     pub occupation: Occupation,
+    pub activity: Option<Activity>,
     pub relationship: Relationship,
 }
 
@@ -89,6 +122,8 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             id,
             name: location.name.clone(),
             serves_food: location.serves_food,
+            opening_hours: location.opening_hours,
+            is_open: location.is_open(world.tick.hour()),
         })
     };
     let home = summarize_location(agent.home)?;
@@ -105,6 +140,8 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 id: *id,
                 name: destination.name.clone(),
                 serves_food: destination.serves_food,
+                opening_hours: destination.opening_hours,
+                is_open: destination.is_open(world.tick.hour()),
             })
         })
         .collect::<Result<Vec<_>, ObservationError>>()?;
@@ -121,6 +158,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 id: *id,
                 name: visible.name.clone(),
                 occupation: visible.occupation.clone(),
+                activity: visible.activity,
                 relationship: agent
                     .relationships
                     .get(id)
@@ -130,26 +168,75 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         })
         .collect::<Result<Vec<_>, ObservationError>>()?;
 
+    let action_affordances = ActionAffordances {
+        move_to: connected
+            .iter()
+            .filter(|location| location.is_open)
+            .map(|location| location.id)
+            .collect(),
+        talk_to: visible_agents
+            .iter()
+            .filter(|agent| agent.activity.is_none())
+            .map(|agent| agent.id)
+            .collect(),
+        can_eat: location.id == agent.home
+            || location.serves_food && location.is_open(world.tick.hour()),
+        can_rest: location.id == agent.home,
+        can_work: agent.workplace == Some(location.id) && location.is_open(world.tick.hour()),
+    };
+    let route_hints = RouteHints {
+        home: next_hop(world, location.id, BTreeSet::from([agent.home])),
+        workplace: agent
+            .workplace
+            .and_then(|workplace| next_hop(world, location.id, BTreeSet::from([workplace]))),
+        food: next_hop(
+            world,
+            location.id,
+            world
+                .locations
+                .values()
+                .filter(|candidate| {
+                    candidate.id == agent.home
+                        || candidate.serves_food && candidate.is_open(world.tick.hour())
+                })
+                .map(|candidate| candidate.id)
+                .collect(),
+        ),
+    };
+
     Ok(AgentObservation {
         tick: world.tick,
+        local_time: LocalTime {
+            day: world.tick.day(),
+            hour: world.tick.hour(),
+            minute: world.tick.minute(),
+        },
         self_description: SelfDescription {
             id: agent.id,
             name: agent.name.clone(),
             age: agent.age,
             occupation: agent.occupation.clone(),
             home,
+            work_hours: workplace
+                .as_ref()
+                .and_then(|location| location.opening_hours),
             workplace,
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
+            activity: agent.activity,
             mood: agent.mood,
         },
         current_location: LocationDescription {
             id: location.id,
             name: location.name.clone(),
             serves_food: location.serves_food,
+            opening_hours: location.opening_hours,
+            is_open: location.is_open(world.tick.hour()),
             connected,
         },
         visible_agents,
+        action_affordances,
+        route_hints,
         goals: agent
             .goals
             .iter()
@@ -166,6 +253,36 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             .collect(),
         beliefs: agent.beliefs.clone(),
     })
+}
+
+fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> Option<LocationId> {
+    if targets.contains(&start) {
+        return None;
+    }
+
+    let mut visited = BTreeSet::from([start]);
+    let mut queue = VecDeque::new();
+    for neighbor in &world.locations.get(&start)?.connected {
+        if world.locations.get(neighbor)?.is_open(world.tick.hour()) {
+            visited.insert(*neighbor);
+            queue.push_back((*neighbor, *neighbor));
+        }
+    }
+
+    while let Some((location, first_hop)) = queue.pop_front() {
+        if targets.contains(&location) {
+            return Some(first_hop);
+        }
+        for neighbor in &world.locations.get(&location)?.connected {
+            if !visited.contains(neighbor)
+                && world.locations.get(neighbor)?.is_open(world.tick.hour())
+            {
+                visited.insert(*neighbor);
+                queue.push_back((*neighbor, first_hop));
+            }
+        }
+    }
+    None
 }
 
 fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
@@ -264,11 +381,12 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObservationError, perceive};
+    use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
-        ActionResult, AgentId, Belief, DialogueTone, GoalKind, ObservationTarget, ProposedAction,
-        Relationship, World,
+        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, GoalKind,
+        ObservationTarget, OpeningHours, ProposedAction, Relationship, Tick, World,
     };
+    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     #[test]
@@ -279,8 +397,8 @@ mod tests {
         let destination = *world.locations[&from]
             .connected
             .iter()
-            .next()
-            .expect("connected location");
+            .find(|id| world.locations[id].is_open(world.tick.hour()))
+            .expect("open connected location");
         assert!(matches!(
             world.execute(hidden, ProposedAction::Move { destination }),
             ActionResult::Success(_)
@@ -299,6 +417,12 @@ mod tests {
             },
         );
         let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(observation.local_time.day, 1);
+        assert_eq!(observation.local_time.hour, 7);
+        assert_eq!(observation.local_time.minute, 0);
+        let work_hours = observation.self_description.work_hours.expect("work hours");
+        assert_eq!(work_hours.opens_at_hour, 8);
+        assert_eq!(work_hours.closes_at_hour, 18);
         assert_eq!(observation.goals.len(), 4);
         assert_eq!(
             observation
@@ -319,7 +443,10 @@ mod tests {
                 .connected
                 .iter()
                 .all(|location| {
-                    location.serves_food == world.locations[&location.id].serves_food
+                    let source = &world.locations[&location.id];
+                    location.serves_food == source.serves_food
+                        && location.opening_hours == source.opening_hours
+                        && location.is_open == source.is_open(world.tick.hour())
                 })
         );
         assert!(
@@ -333,6 +460,44 @@ mod tests {
             world.agents[&observer].mood
         );
         assert_eq!(observation.visible_agents.len(), 6);
+        assert_eq!(
+            observation.action_affordances.move_to,
+            observation
+                .current_location
+                .connected
+                .iter()
+                .filter(|location| location.is_open)
+                .map(|location| location.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            observation.action_affordances.talk_to,
+            observation
+                .visible_agents
+                .iter()
+                .map(|agent| agent.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            observation.action_affordances.can_eat,
+            observation.current_location.id == observation.self_description.home.id
+                || observation.current_location.serves_food && observation.current_location.is_open
+        );
+        assert_eq!(
+            observation.action_affordances.can_rest,
+            observation.current_location.id == observation.self_description.home.id
+        );
+        assert!(!observation.action_affordances.can_work);
+        assert!(
+            [
+                observation.route_hints.home,
+                observation.route_hints.workplace,
+                observation.route_hints.food,
+            ]
+            .into_iter()
+            .flatten()
+            .all(|next_hop| observation.action_affordances.move_to.contains(&next_hop))
+        );
         assert!(
             serde_json::to_value(&observation.visible_agents[0])
                 .expect("visible agent JSON")
@@ -341,6 +506,72 @@ mod tests {
         );
         assert!(observation.relevant_memories[0].contains("moved from"));
         assert!(observation.beliefs.is_empty());
+    }
+
+    #[test]
+    fn observations_show_current_activities_and_exclude_busy_talk_targets() {
+        let mut world = World::briar_glen(12).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let observer = residents[0];
+        let visible = residents[1];
+        let activity = Activity {
+            kind: ActivityKind::Working,
+            until: Tick(world.tick.0 + 12),
+        };
+        world.agents.get_mut(&observer).expect("observer").activity = Some(Activity {
+            kind: ActivityKind::Waiting,
+            until: Tick(world.tick.0 + 1),
+        });
+        world.agents.get_mut(&visible).expect("visible").activity = Some(activity);
+
+        let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(
+            observation.self_description.activity.map(|a| a.kind),
+            Some(ActivityKind::Waiting)
+        );
+        assert_eq!(
+            observation
+                .visible_agents
+                .iter()
+                .find(|agent| agent.id == visible)
+                .and_then(|agent| agent.activity),
+            Some(activity)
+        );
+        assert!(!observation.action_affordances.talk_to.contains(&visible));
+    }
+
+    #[test]
+    fn routes_are_deterministic_and_use_only_open_locations() {
+        let mut world = World::briar_glen(12).expect("town");
+        world.tick = Tick(12 * 12);
+        let location = |name: &str| {
+            world
+                .locations
+                .values()
+                .find(|location| location.name == name)
+                .map(|location| location.id)
+                .expect("location")
+        };
+        let mill = location("Abandoned Mill");
+        let houses = location("Riverside Houses");
+        let store = location("General Store");
+        let target = BTreeSet::from([store]);
+
+        world.locations.get_mut(&mill).expect("mill").opening_hours = Some(OpeningHours {
+            opens_at_hour: 0,
+            closes_at_hour: 1,
+        });
+        assert_eq!(next_hop(&world, mill, target.clone()), Some(houses));
+
+        for location in world.locations.values_mut() {
+            if location.id != mill && location.id != store {
+                location.opening_hours = Some(OpeningHours {
+                    opens_at_hour: 0,
+                    closes_at_hour: 1,
+                });
+            }
+        }
+        assert_eq!(next_hop(&world, mill, target), None);
     }
 
     #[test]
@@ -436,8 +667,8 @@ mod tests {
         let destination = *world.locations[&home]
             .connected
             .iter()
-            .next()
-            .expect("destination");
+            .find(|id| world.locations[id].is_open(world.tick.hour()))
+            .expect("open destination");
         world.execute(hidden, ProposedAction::Move { destination });
         world
             .agents

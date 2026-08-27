@@ -160,11 +160,12 @@ mod tests {
     #[tokio::test]
     async fn thirty_days_preserve_invariants() {
         let world = World::briar_glen(1_234).expect("town");
+        let start = world.tick.0;
         let mut engine = RandomDecisionEngine::new(1_234);
         let result = run_simulation(world, 30 * 288, &mut engine)
             .await
             .expect("simulation");
-        assert_eq!(result.tick.0, 30 * 288);
+        assert_eq!(result.tick.0, start + 30 * 288);
         result.validate().expect("valid world");
     }
 }

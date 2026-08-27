@@ -119,7 +119,7 @@ fn location_name(world: &World, id: LocationId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_run, render_run_since};
+    use super::{render_event, render_run, render_run_since};
     use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
 
     #[tokio::test]
@@ -135,8 +135,8 @@ mod tests {
         assert!(rendered.contains("=== RUN SUMMARY ==="));
 
         let resumed = render_run_since(&world, 10);
-        assert!(!resumed.contains("00:05  "));
-        assert!(resumed.contains("00:55  "));
-        assert!(resumed.contains("Events: 20"));
+        assert!(!resumed.contains("07:05  "));
+        assert!(resumed.contains(&render_event(&world, &world.events()[10])));
+        assert!(resumed.contains(&format!("Events: {}", world.events().len())));
     }
 }

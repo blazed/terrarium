@@ -1,7 +1,7 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, VisibleAgent},
-    sim::{DialogueTone, GoalKind, ObservationTarget, ProposedAction},
+    sim::{DialogueTone, GoalKind, LocationId, ObservationTarget, ProposedAction},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -29,23 +29,12 @@ impl DecisionEngine for RandomDecisionEngine {
         let needs = &observation.self_description.needs;
         let personality = &observation.self_description.personality;
         let mood = observation.self_description.mood;
-        let connected_to = |target| {
-            observation
-                .current_location
-                .connected
-                .iter()
-                .any(|location| location.id == target)
-        };
-        let move_or_wait = |target| {
-            if observation.current_location.id == target {
-                ProposedAction::Wait
-            } else if connected_to(target) {
-                ProposedAction::Move {
-                    destination: target,
-                }
-            } else {
-                ProposedAction::Wait
-            }
+        let follow_route = |next_hop: Option<LocationId>| {
+            next_hop
+                .filter(|destination| observation.action_affordances.move_to.contains(destination))
+                .map_or(ProposedAction::Wait, |destination| ProposedAction::Move {
+                    destination,
+                })
         };
         let relationship_score = |agent: &VisibleAgent| {
             let relationship = agent.relationship;
@@ -69,43 +58,30 @@ impl DecisionEngine for RandomDecisionEngine {
             observation
                 .visible_agents
                 .iter()
+                .filter(|agent| observation.action_affordances.talk_to.contains(&agent.id))
                 .max_by(|left, right| {
                     relationship_score(left).total_cmp(&relationship_score(right))
                 })
-                .expect("visible agents checked")
         };
 
         if needs.food < 0.25 {
-            if observation.current_location.id == observation.self_description.home.id
-                || observation.current_location.serves_food
-            {
+            if observation.action_affordances.can_eat {
                 return Ok(ProposedAction::Eat);
             }
-            if let Some(location) = observation
-                .current_location
-                .connected
-                .iter()
-                .find(|location| location.serves_food)
-            {
-                return Ok(ProposedAction::Move {
-                    destination: location.id,
-                });
-            }
-            return Ok(move_or_wait(observation.self_description.home.id));
+            return Ok(follow_route(observation.route_hints.food));
         }
         if needs.energy < 0.2 + 0.1 * personality.neuroticism {
             return Ok(
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    move_or_wait(observation.self_description.home.id)
+                    follow_route(observation.route_hints.home)
                 },
             );
         }
         if needs.companionship < 0.2 + 0.1 * personality.agreeableness
-            && !observation.visible_agents.is_empty()
+            && let Some(companion) = preferred_companion()
         {
-            let companion = preferred_companion();
             return Ok(talk(observation, companion));
         }
         if needs.safety < 0.1 + 0.2 * personality.neuroticism {
@@ -120,7 +96,7 @@ impl DecisionEngine for RandomDecisionEngine {
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    move_or_wait(observation.self_description.home.id)
+                    follow_route(observation.route_hints.home)
                 },
             );
         }
@@ -144,20 +120,22 @@ impl DecisionEngine for RandomDecisionEngine {
                 continue;
             }
             match goal_kind {
-                GoalKind::Livelihood if (8..18).contains(&hour) => {
-                    if let Some(workplace) = &observation.self_description.workplace {
-                        if observation.current_location.id == workplace.id {
+                GoalKind::Livelihood => {
+                    if let Some(workplace) = &observation.self_description.workplace
+                        && workplace.is_open
+                    {
+                        if observation.action_affordances.can_work {
                             return Ok(ProposedAction::Work);
                         }
-                        if connected_to(workplace.id) {
-                            return Ok(ProposedAction::Move {
-                                destination: workplace.id,
-                            });
+                        if observation.route_hints.workplace.is_some() {
+                            return Ok(follow_route(observation.route_hints.workplace));
                         }
                     }
                 }
-                GoalKind::Community if !observation.visible_agents.is_empty() => {
-                    return Ok(talk(observation, preferred_companion()));
+                GoalKind::Community => {
+                    if let Some(companion) = preferred_companion() {
+                        return Ok(talk(observation, companion));
+                    }
                 }
                 GoalKind::Exploration => {
                     return Ok(ProposedAction::Observe {
@@ -173,21 +151,24 @@ impl DecisionEngine for RandomDecisionEngine {
                         ProposedAction::Rest
                     });
                 }
-                GoalKind::Wellbeing if observation.current_location.serves_food => {
+                GoalKind::Wellbeing if observation.action_affordances.can_eat => {
                     return Ok(ProposedAction::Eat);
+                }
+                GoalKind::Wellbeing if observation.route_hints.food.is_some() => {
+                    return Ok(follow_route(observation.route_hints.food));
                 }
                 _ => {}
             }
         }
 
-        if (8..18).contains(&hour)
-            && (needs.money < 0.75 || needs.status < 0.75)
+        if (needs.money < 0.75 || needs.status < 0.75)
             && let Some(workplace) = &observation.self_description.workplace
+            && workplace.is_open
         {
-            return Ok(if observation.current_location.id == workplace.id {
+            return Ok(if observation.action_affordances.can_work {
                 ProposedAction::Work
             } else {
-                move_or_wait(workplace.id)
+                follow_route(observation.route_hints.workplace)
             });
         }
 
@@ -207,13 +188,16 @@ impl DecisionEngine for RandomDecisionEngine {
             .unwrap_or(3);
 
         Ok(match action {
-            0 if !observation.current_location.connected.is_empty() => {
-                let index = rng.random_range(0..observation.current_location.connected.len());
+            0 if !observation.action_affordances.move_to.is_empty() => {
+                let index = rng.random_range(0..observation.action_affordances.move_to.len());
                 ProposedAction::Move {
-                    destination: observation.current_location.connected[index].id,
+                    destination: observation.action_affordances.move_to[index],
                 }
             }
-            1 if !observation.visible_agents.is_empty() => talk(observation, preferred_companion()),
+            1 if preferred_companion().is_some() => talk(
+                observation,
+                preferred_companion().expect("available companion"),
+            ),
             2 => {
                 let target = if observation.visible_agents.is_empty() || rng.random_bool(0.5) {
                     ObservationTarget::Location(observation.current_location.id)
@@ -380,6 +364,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn routines_follow_multi_hop_route_hints() {
+        let mut world = World::briar_glen(7).expect("town");
+        let actor = world
+            .agents
+            .values()
+            .find(|agent| agent.name == "Clara Voss")
+            .map(|agent| agent.id)
+            .expect("resident");
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.needs.food = 1.0;
+        agent.needs.energy = 1.0;
+        agent.needs.companionship = 1.0;
+        agent.needs.safety = 1.0;
+        agent.personality.ambition = 1.0;
+        agent.personality.openness = 0.0;
+        agent.personality.agreeableness = 0.0;
+        agent.personality.neuroticism = 0.0;
+        agent.personality.impulsiveness = 0.0;
+        world.advance_to(Tick(8 * 12)).expect("morning");
+
+        let observation = perceive(&world, actor).expect("observation");
+        let next_hop = observation.route_hints.workplace.expect("route");
+        assert_ne!(
+            next_hop,
+            observation
+                .self_description
+                .workplace
+                .as_ref()
+                .expect("workplace")
+                .id
+        );
+        assert_eq!(
+            RandomDecisionEngine::new(7)
+                .decide(&observation)
+                .await
+                .expect("decision"),
+            ProposedAction::Move {
+                destination: next_hop
+            }
+        );
     }
 
     #[tokio::test]

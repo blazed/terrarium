@@ -1,5 +1,8 @@
 use super::{DecisionEngine, DecisionError};
-use crate::{cognition::AgentObservation, sim::ProposedAction};
+use crate::{
+    cognition::AgentObservation,
+    sim::{ObservationTarget, ProposedAction},
+};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use std::{net::IpAddr, time::Duration};
@@ -9,6 +12,7 @@ The observation is subjective and complete: do not invent people, places, posses
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior; weigh sociability, reliability, and hostility by confidence, never as objective facts.
+The observation gives local_time, work_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
 For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation and relevant memories. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
@@ -195,7 +199,29 @@ impl DecisionEngine for OpenAiDecisionEngine {
             .ok_or(DecisionError::MissingChoice)?
             .message
             .content;
-        Ok(serde_json::from_str(content.trim())?)
+        let action = serde_json::from_str(content.trim())?;
+        if !action_is_afforded(observation, &action) {
+            return Err(DecisionError::UnavailableAction);
+        }
+        Ok(action)
+    }
+}
+
+fn action_is_afforded(observation: &AgentObservation, action: &ProposedAction) -> bool {
+    let affordances = &observation.action_affordances;
+    match action {
+        ProposedAction::Move { destination } => affordances.move_to.contains(destination),
+        ProposedAction::Talk { target, .. } => affordances.talk_to.contains(target),
+        ProposedAction::Observe {
+            target: ObservationTarget::Agent(target),
+        } => affordances.talk_to.contains(target),
+        ProposedAction::Observe {
+            target: ObservationTarget::Location(target),
+        } => *target == observation.current_location.id,
+        ProposedAction::Eat => affordances.can_eat,
+        ProposedAction::Rest => affordances.can_rest,
+        ProposedAction::Work => affordances.can_work,
+        ProposedAction::Wait => true,
     }
 }
 
@@ -255,7 +281,9 @@ struct ResponseMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, ChatRequest, OpenAiDecisionEngine, ReasoningEffort};
+    use super::{
+        ChatMessage, ChatRequest, OpenAiDecisionEngine, ReasoningEffort, action_is_afforded,
+    };
     use crate::{
         cognition::perceive,
         decision::{DecisionEngine, DecisionError},
@@ -267,6 +295,25 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[test]
+    fn unavailable_actions_are_rejected_before_execution() {
+        let world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let observation = perceive(&world, actor).expect("observation");
+
+        assert!(action_is_afforded(&observation, &ProposedAction::Wait));
+        assert_eq!(
+            action_is_afforded(&observation, &ProposedAction::Work),
+            observation.action_affordances.can_work
+        );
+        assert!(!action_is_afforded(
+            &observation,
+            &ProposedAction::Move {
+                destination: observation.current_location.id,
+            }
+        ));
+    }
 
     #[tokio::test]
     async fn local_response_executes_through_the_world() {
@@ -283,6 +330,18 @@ mod tests {
             assert!(request.contains("friendly|supportive|neutral|tense"));
             assert!(request.contains("Mood ranges from -1"));
             assert!(request.contains("Beliefs are subjective estimates"));
+            assert!(request.contains("Route hints are immediate legal move_to IDs"));
+            assert!(request.contains("Move only to a move_to ID"));
+            assert!(request.contains("when its can_* value is true"));
+            assert!(request.contains(r#"\"local_time\":{\"day\":1,\"hour\":7,\"minute\":0}"#));
+            assert!(
+                request.contains(r#"\"work_hours\":{\"opens_at_hour\":6,\"closes_at_hour\":14}"#)
+            );
+            assert!(request.contains(r#"\"opening_hours\":"#));
+            assert!(request.contains(r#"\"is_open\":"#));
+            assert!(request.contains(r#"\"action_affordances\":{\"move_to\":["#));
+            assert!(request.contains(r#"\"route_hints\":"#));
+            assert!(request.contains(r#"\"can_work\":false"#));
             assert!(request.contains(r#""temperature":0.7"#));
             assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
             assert!(request.contains(r#""max_completion_tokens":512"#));
