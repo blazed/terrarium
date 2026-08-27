@@ -118,6 +118,25 @@ mod tests {
         left.validate().expect("valid world");
     }
 
+    #[tokio::test]
+    async fn different_seeds_diverge_within_ten_ticks() {
+        let mut signatures = Vec::new();
+        for seed in [814_921, 2_643, 4_375, 5_276] {
+            let world = World::briar_glen(seed).expect("town");
+            let mut engine = RandomDecisionEngine::new(seed);
+            let world = run_simulation(world, 10, &mut engine)
+                .await
+                .expect("simulation");
+            let signature = world
+                .events()
+                .iter()
+                .map(|event| std::mem::discriminant(&event.kind))
+                .collect::<Vec<_>>();
+            assert!(!signatures.contains(&signature));
+            signatures.push(signature);
+        }
+    }
+
     struct FailingEngine;
 
     impl DecisionEngine for FailingEngine {

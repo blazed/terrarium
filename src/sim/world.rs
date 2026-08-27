@@ -1,8 +1,9 @@
 use super::{
     ActionRejection, ActionResult, Agent, AgentId, Event, EventId, EventKind, Goal, GoalKind,
-    Location, LocationId, Needs, ObservationTarget, Occupation, Personality, ProposedAction,
-    Relationship, Tick, seeded_uuid,
+    Location, LocationId, MAX_TALK_MESSAGE_CHARS, Needs, ObservationTarget, Occupation,
+    Personality, ProposedAction, Relationship, Tick, seeded_uuid,
 };
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -105,10 +106,21 @@ impl World {
             ("Iris Bell", 27, Occupation::Clerk, 2),
         ];
         let mut agents = BTreeMap::new();
+        let mut rng = StdRng::seed_from_u64(seed);
         for (index, (name, age, occupation, workplace)) in residents.into_iter().enumerate() {
             let id = AgentId(seeded_uuid(1, seed, index as u32));
             let home = location_ids[5];
             let personality_offset = index as f32 * 0.03;
+            let mut vary = |base: f32| (base + rng.random_range(-0.15..=0.15)).clamp(0.0, 1.0);
+            let personality = Personality {
+                openness: vary(0.45 + personality_offset),
+                agreeableness: vary(0.7 - personality_offset),
+                neuroticism: vary(0.25 + personality_offset),
+                honesty: vary(0.75 - personality_offset / 2.0),
+                ambition: vary(0.4 + personality_offset),
+                impulsiveness: vary(0.5 - personality_offset),
+            };
+            let mut vary_need = |base: f32| (base + rng.random_range(-0.08..=0.08)).clamp(0.0, 1.0);
             let agent = Agent {
                 id,
                 name: name.into(),
@@ -117,21 +129,14 @@ impl World {
                 home,
                 workplace: Some(location_ids[workplace]),
                 location: home,
-                personality: Personality {
-                    openness: 0.45 + personality_offset,
-                    agreeableness: 0.7 - personality_offset,
-                    neuroticism: 0.25 + personality_offset,
-                    honesty: 0.75 - personality_offset / 2.0,
-                    ambition: 0.4 + personality_offset,
-                    impulsiveness: 0.5 - personality_offset,
-                },
+                personality,
                 needs: Needs {
-                    money: 0.5,
-                    food: 0.2,
-                    companionship: 0.3,
-                    safety: 0.15,
-                    status: 0.35,
-                    energy: 0.8,
+                    money: vary_need(0.5),
+                    food: vary_need(0.2),
+                    companionship: vary_need(0.3),
+                    safety: vary_need(0.15),
+                    status: vary_need(0.35),
+                    energy: vary_need(0.8),
                 },
                 relationships: BTreeMap::new(),
                 goals: vec![
@@ -387,13 +392,26 @@ impl World {
                         ActionRejection::NotCoLocated { actor, target },
                     );
                 }
-                if message.trim().is_empty() {
+                let message = message.trim();
+                if message.is_empty() {
                     return self.reject(actor, Some(current), ActionRejection::EmptyMessage);
+                }
+                if message.chars().any(char::is_control) {
+                    return self.reject(actor, Some(current), ActionRejection::InvalidMessage);
+                }
+                if message.chars().count() > MAX_TALK_MESSAGE_CHARS {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::MessageTooLong {
+                            max: MAX_TALK_MESSAGE_CHARS,
+                        },
+                    );
                 }
                 EventKind::Spoke {
                     speaker: actor,
                     listener: target,
-                    message,
+                    message: message.into(),
                 }
             }
             ProposedAction::Observe { target } => {
@@ -564,14 +582,17 @@ impl World {
 
     fn strengthen_relationship(&mut self, source: AgentId, target: AgentId, amount: f32) {
         if let Some(agent) = self.agents.get_mut(&source) {
+            let warmth = 0.75 + 0.5 * agent.personality.agreeableness;
+            let credibility = 0.75 + 0.5 * agent.personality.honesty;
             let relationship = agent
                 .relationships
                 .entry(target)
                 .or_insert(Relationship::NEUTRAL);
-            relationship.affection = (relationship.affection + 0.02 * amount).min(1.0);
-            relationship.trust = (relationship.trust + 0.015 * amount).min(1.0);
+            relationship.affection = (relationship.affection + 0.02 * amount * warmth).min(1.0);
+            relationship.trust = (relationship.trust + 0.015 * amount * credibility).min(1.0);
             relationship.respect = (relationship.respect + 0.005 * amount).min(1.0);
-            relationship.suspicion = (relationship.suspicion - 0.01 * amount).max(-1.0);
+            relationship.suspicion =
+                (relationship.suspicion - 0.01 * amount * credibility).max(-1.0);
         }
     }
 
@@ -717,8 +738,8 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, AgentId, EventKind, ObservationTarget, ProposedAction,
-        Relationship, Tick, World, WorldError,
+        ActionRejection, ActionResult, AgentId, EventKind, MAX_TALK_MESSAGE_CHARS,
+        ObservationTarget, ProposedAction, Relationship, Tick, World, WorldError,
     };
     use uuid::Uuid;
 
@@ -999,6 +1020,91 @@ mod tests {
         assert_eq!(speaker_view.suspicion, -1.0);
         assert!(speaker_view.is_normalized() && listener_view.is_normalized());
         world.validate().expect("valid relationships");
+    }
+
+    #[test]
+    fn agreeable_honest_speakers_build_relationships_faster() {
+        let mut warm = World::briar_glen(42).expect("town");
+        let residents = warm.agents.keys().copied().collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[2];
+        let mut cold = warm.clone();
+        warm.agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .personality
+            .agreeableness = 1.0;
+        warm.agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .personality
+            .honesty = 1.0;
+        cold.agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .personality
+            .agreeableness = 0.0;
+        cold.agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .personality
+            .honesty = 0.0;
+        let talk = ProposedAction::Talk {
+            target: listener,
+            message: "Good to see you.".into(),
+        };
+
+        warm.execute(speaker, talk.clone());
+        cold.execute(speaker, talk);
+
+        let warm_view = warm.agents[&speaker].relationships[&listener];
+        let cold_view = cold.agents[&speaker].relationships[&listener];
+        assert!(warm_view.affection > cold_view.affection);
+        assert!(warm_view.trust > cold_view.trust);
+        assert!(warm_view.suspicion < cold_view.suspicion);
+    }
+
+    #[test]
+    fn dialogue_is_trimmed_and_bounded_to_one_printable_line() {
+        let mut world = World::briar_glen(43).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let actor = residents[0];
+        let listener = residents[1];
+
+        for (message, rejection) in [
+            ("   ".into(), ActionRejection::EmptyMessage),
+            ("hello\nthere".into(), ActionRejection::InvalidMessage),
+            (
+                "x".repeat(MAX_TALK_MESSAGE_CHARS + 1),
+                ActionRejection::MessageTooLong {
+                    max: MAX_TALK_MESSAGE_CHARS,
+                },
+            ),
+        ] {
+            assert_eq!(
+                world.execute(
+                    actor,
+                    ProposedAction::Talk {
+                        target: listener,
+                        message,
+                    },
+                ),
+                ActionResult::Rejected(rejection)
+            );
+        }
+
+        let result = world.execute(
+            actor,
+            ProposedAction::Talk {
+                target: listener,
+                message: "  A concise greeting.  ".into(),
+            },
+        );
+        assert!(matches!(
+            result,
+            ActionResult::Success(events)
+                if matches!(&events[0].kind, EventKind::Spoke { message, .. } if message == "A concise greeting.")
+        ));
     }
 
     #[test]

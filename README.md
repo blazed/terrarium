@@ -42,14 +42,14 @@ cargo test
 
 ## Architecture
 
-The pipeline is `World → perceive → AgentObservation → DecisionEngine → ProposedAction → World::execute → Event`. IDs, simulation time, actions, rejections, and events are typed. Seed-derived IDs and a seeded random engine make runs reproducible.
+The pipeline is `World → perceive → AgentObservation → DecisionEngine → ProposedAction → World::execute → Event`. IDs, simulation time, actions, rejections, and events are typed. Seed-derived IDs, initial personalities and needs, and a seeded random engine make runs reproducible while different seeds diverge immediately.
 
 Agents retain their 20 most recent witnessed movements, conversations, activities, and goal completions. These subjective memories are persisted with checkpoints and included in future decisions; unseen events and idle waits are omitted. Beliefs remain intentionally unimplemented.
 
 Each resident has livelihood, community, exploration, and wellbeing goals. Successful matching actions advance bounded progress and emit one completion event at 100%; decision engines receive that subjective progress and prioritize feasible unfinished goals after urgent needs.
 
-Needs are satisfaction values that decay with simulated time and recover through successful actions. The random engine responds to urgent food, energy, companionship, and safety needs, heads to work by day, and returns home at night. `Eat` is available at home and food-serving locations, `Rest` at home, and `Work` at an agent's workplace from 08:00 through 17:59; `Wait` has no activity effects.
+Needs are satisfaction values that decay with simulated time and recover through successful actions. The random engine responds to urgent food, energy, companionship, and safety needs, heads to work by day, and returns home at night. Personality then shapes deterministic choices: openness and impulsiveness favor exploration, agreeableness favors company, ambition favors work, and neuroticism favors safety and rest. `Eat` is available at home and food-serving locations, `Rest` at home, and `Work` at an agent's workplace from 08:00 through 17:59; `Wait` has no activity effects.
 
-Conversations strengthen both residents' directional affection, trust, and respect while reducing suspicion. Observations expose only the observer's relationship toward each visible resident, and the random engine prefers stronger relationships when choosing conversation partners.
+Conversations strengthen both residents' directional affection, trust, and respect while reducing suspicion; agreeable residents gain affection faster, while honest residents gain trust and lose suspicion faster. Observations expose only the observer's relationship toward each visible resident, and the random engine prefers stronger relationships when choosing conversation partners. Random dialogue reflects personality, the listener, and current location; model dialogue can also use subjective memories. Messages are trimmed and limited to one printable line of 200 characters before they enter events, memories, or streamed output.
 
 Model decisions use strict JSON proposals through the same authoritative validation path as random decisions.

@@ -27,6 +27,7 @@ impl DecisionEngine for RandomDecisionEngine {
         let mut rng = StdRng::from_seed(seed);
 
         let needs = &observation.self_description.needs;
+        let personality = &observation.self_description.personality;
         let connected_to = |target| {
             observation
                 .current_location
@@ -62,7 +63,6 @@ impl DecisionEngine for RandomDecisionEngine {
                     relationship_score(left).total_cmp(&relationship_score(right))
                 })
                 .expect("visible agents checked")
-                .id
         };
 
         if needs.food < 0.25 {
@@ -83,7 +83,7 @@ impl DecisionEngine for RandomDecisionEngine {
             }
             return Ok(move_or_wait(observation.self_description.home.id));
         }
-        if needs.energy < 0.25 {
+        if needs.energy < 0.2 + 0.1 * personality.neuroticism {
             return Ok(
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
@@ -92,13 +92,16 @@ impl DecisionEngine for RandomDecisionEngine {
                 },
             );
         }
-        if needs.companionship < 0.25 && !observation.visible_agents.is_empty() {
+        if needs.companionship < 0.2 + 0.1 * personality.agreeableness
+            && !observation.visible_agents.is_empty()
+        {
+            let companion = preferred_companion();
             return Ok(ProposedAction::Talk {
-                target: preferred_companion(),
-                message: "Good to see you.".into(),
+                target: companion.id,
+                message: dialogue(observation, companion),
             });
         }
-        if needs.safety < 0.2 {
+        if needs.safety < 0.1 + 0.2 * personality.neuroticism {
             return Ok(ProposedAction::Observe {
                 target: ObservationTarget::Location(observation.current_location.id),
             });
@@ -115,8 +118,25 @@ impl DecisionEngine for RandomDecisionEngine {
             );
         }
 
-        for goal in observation.goals.iter().filter(|goal| goal.progress < 1.0) {
-            match goal.kind {
+        let mut goal_priorities = [
+            (GoalKind::Livelihood, personality.ambition),
+            (GoalKind::Community, personality.agreeableness),
+            (
+                GoalKind::Exploration,
+                (personality.openness + personality.impulsiveness) / 2.0,
+            ),
+            (GoalKind::Wellbeing, personality.neuroticism),
+        ];
+        goal_priorities.sort_by(|left, right| right.1.total_cmp(&left.1));
+        for (goal_kind, _) in goal_priorities {
+            if !observation
+                .goals
+                .iter()
+                .any(|goal| goal.kind == goal_kind && goal.progress < 1.0)
+            {
+                continue;
+            }
+            match goal_kind {
                 GoalKind::Livelihood if (8..18).contains(&hour) => {
                     if let Some(workplace) = &observation.self_description.workplace {
                         if observation.current_location.id == workplace.id {
@@ -130,9 +150,10 @@ impl DecisionEngine for RandomDecisionEngine {
                     }
                 }
                 GoalKind::Community if !observation.visible_agents.is_empty() => {
+                    let companion = preferred_companion();
                     return Ok(ProposedAction::Talk {
-                        target: preferred_companion(),
-                        message: "Good to see you.".into(),
+                        target: companion.id,
+                        message: dialogue(observation, companion),
                     });
                 }
                 GoalKind::Exploration => {
@@ -167,17 +188,35 @@ impl DecisionEngine for RandomDecisionEngine {
             });
         }
 
-        Ok(match rng.random_range(0..4) {
+        let weights = [
+            0.5 + personality.openness + personality.impulsiveness,
+            0.5 + personality.agreeableness,
+            0.5 + personality.openness + personality.neuroticism,
+            1.5 - personality.impulsiveness,
+        ];
+        let mut choice = rng.random::<f32>() * weights.iter().sum::<f32>();
+        let action = weights
+            .iter()
+            .position(|weight| {
+                choice -= weight;
+                choice <= 0.0
+            })
+            .unwrap_or(3);
+
+        Ok(match action {
             0 if !observation.current_location.connected.is_empty() => {
                 let index = rng.random_range(0..observation.current_location.connected.len());
                 ProposedAction::Move {
                     destination: observation.current_location.connected[index].id,
                 }
             }
-            1 if !observation.visible_agents.is_empty() => ProposedAction::Talk {
-                target: preferred_companion(),
-                message: "Good to see you.".into(),
-            },
+            1 if !observation.visible_agents.is_empty() => {
+                let companion = preferred_companion();
+                ProposedAction::Talk {
+                    target: companion.id,
+                    message: dialogue(observation, companion),
+                }
+            }
             2 => {
                 let target = if observation.visible_agents.is_empty() || rng.random_bool(0.5) {
                     ObservationTarget::Location(observation.current_location.id)
@@ -189,6 +228,42 @@ impl DecisionEngine for RandomDecisionEngine {
             }
             _ => ProposedAction::Wait,
         })
+    }
+}
+
+fn dialogue(observation: &AgentObservation, companion: &VisibleAgent) -> String {
+    let personality = &observation.self_description.personality;
+    let dominant = [
+        personality.openness,
+        personality.agreeableness,
+        personality.neuroticism,
+        personality.honesty,
+        personality.ambition,
+        personality.impulsiveness,
+    ]
+    .into_iter()
+    .enumerate()
+    .max_by(|left, right| left.1.total_cmp(&right.1))
+    .expect("personality has traits")
+    .0;
+    let alternate = observation.tick.0.is_multiple_of(2);
+    let name = &companion.name;
+    let location = &observation.current_location.name;
+
+    match (dominant, alternate) {
+        (0, true) => format!("What have you noticed around {location}, {name}?"),
+        (0, false) => format!("What else might be worth exploring, {name}?"),
+        (1, true) => format!("It's good to see you, {name}."),
+        (1, false) => format!("How are you doing today, {name}?"),
+        (2, true) => format!("Does everything seem all right here, {name}?"),
+        (2, false) => format!("Do you feel safe around {location}, {name}?"),
+        (3, true) => format!("I'd value your honest opinion, {name}."),
+        (3, false) => format!("Let me speak plainly, {name}: how are things?"),
+        (4, true) => format!("What are you working toward, {name}?"),
+        (4, false) => format!("How is your work going, {name}?"),
+        (5, true) => format!("What should we do next, {name}?"),
+        (5, false) => format!("Let's try something different today, {name}."),
+        _ => unreachable!(),
     }
 }
 
@@ -224,6 +299,11 @@ mod tests {
         agent.needs.energy = 0.5;
         agent.needs.companionship = 0.5;
         agent.needs.safety = 0.5;
+        agent.personality.openness = 0.0;
+        agent.personality.agreeableness = 0.0;
+        agent.personality.neuroticism = 0.0;
+        agent.personality.ambition = 1.0;
+        agent.personality.impulsiveness = 0.0;
         world.advance_to(Tick(8 * 12)).expect("morning");
         let working = perceive(&world, actor).expect("observation");
         let workplace = working
@@ -272,13 +352,12 @@ mod tests {
         }
         let preferred = lonely.visible_agents[0].id;
         lonely.visible_agents[0].relationship.affection = 1.0;
-        assert_eq!(
+        let companion_name = lonely.visible_agents[0].name.clone();
+        assert!(matches!(
             engine.decide(&lonely).await.expect("decision"),
-            ProposedAction::Talk {
-                target: preferred,
-                message: "Good to see you.".into()
-            }
-        );
+            ProposedAction::Talk { target, message }
+                if target == preferred && message.contains(&companion_name)
+        ));
 
         let mut purposeful = lonely;
         purposeful.self_description.needs.companionship = 0.5;
@@ -297,5 +376,41 @@ mod tests {
                 target: ObservationTarget::Location(purposeful.current_location.id)
             }
         );
+
+        for goal in &mut purposeful.goals {
+            goal.progress = 0.0;
+        }
+        let personality = &mut purposeful.self_description.personality;
+        personality.openness = 0.0;
+        personality.agreeableness = 1.0;
+        personality.neuroticism = 0.0;
+        personality.ambition = 0.0;
+        personality.impulsiveness = 0.0;
+        assert!(matches!(
+            engine.decide(&purposeful).await.expect("decision"),
+            ProposedAction::Talk { message, .. }
+                if message == format!("It's good to see you, {companion_name}.")
+        ));
+
+        purposeful.self_description.personality.agreeableness = 0.0;
+        purposeful.self_description.personality.ambition = 1.0;
+        assert_eq!(
+            engine.decide(&purposeful).await.expect("decision"),
+            ProposedAction::Move {
+                destination: purposeful
+                    .self_description
+                    .workplace
+                    .as_ref()
+                    .expect("workplace")
+                    .id
+            }
+        );
+
+        purposeful.self_description.personality.ambition = 0.0;
+        purposeful.self_description.personality.openness = 1.0;
+        assert!(matches!(
+            engine.decide(&purposeful).await.expect("decision"),
+            ProposedAction::Observe { .. }
+        ));
     }
 }

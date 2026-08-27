@@ -6,7 +6,9 @@ mod relationship;
 mod scheduler;
 mod world;
 
-pub use action::{ActionRejection, ActionResult, ObservationTarget, ProposedAction};
+pub use action::{
+    ActionRejection, ActionResult, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
+};
 pub use agent::{Agent, Goal, GoalKind, Needs, Occupation, Personality};
 pub use event::{Event, EventKind};
 pub use location::Location;

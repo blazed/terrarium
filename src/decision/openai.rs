@@ -7,6 +7,8 @@ use std::{net::IpAddr, time::Duration};
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
+Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest.
+For talk, write natural dialogue grounded only in the current observation and relevant memories. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
 {"action":"talk","target":"agent UUID","message":"non-empty text"}
@@ -275,6 +277,8 @@ mod tests {
             assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
             assert!(request.contains("self_description"));
             assert!(request.contains("progress"));
+            assert!(request.contains("relevant memories"));
+            assert!(request.contains("200 characters"));
             assert!(request.contains(r#""temperature":0.7"#));
             assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
             assert!(request.contains(r#""max_completion_tokens":512"#));

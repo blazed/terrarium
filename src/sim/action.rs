@@ -1,6 +1,8 @@
 use super::{AgentId, Event, LocationId};
 use serde::{Deserialize, Serialize};
 
+pub const MAX_TALK_MESSAGE_CHARS: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target", content = "id", rename_all = "snake_case")]
 pub enum ObservationTarget {
@@ -52,6 +54,10 @@ pub enum ActionRejection {
     OutsideWorkingHours(u64),
     #[error("message cannot be empty")]
     EmptyMessage,
+    #[error("message must be a single printable line")]
+    InvalidMessage,
+    #[error("message cannot exceed {max} characters")]
+    MessageTooLong { max: usize },
     #[error("world membership for actor {0} is inconsistent")]
     InvalidMembership(AgentId),
 }
