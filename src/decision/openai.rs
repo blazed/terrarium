@@ -23,6 +23,39 @@ pub struct OpenAiDecisionEngine {
     endpoint: Url,
     model: String,
     api_key: Option<String>,
+    temperature: f32,
+    reasoning_effort: Option<ReasoningEffort>,
+    max_completion_tokens: Option<u32>,
+    provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl std::str::FromStr for ReasoningEffort {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => Err(()),
+        }
+    }
 }
 
 impl OpenAiDecisionEngine {
@@ -61,6 +94,10 @@ impl OpenAiDecisionEngine {
             endpoint,
             model,
             api_key: None,
+            temperature: 0.0,
+            reasoning_effort: None,
+            max_completion_tokens: None,
+            provider: None,
         })
     }
 
@@ -72,6 +109,42 @@ impl OpenAiDecisionEngine {
             ));
         }
         self.api_key = Some(api_key);
+        Ok(self)
+    }
+
+    pub fn with_temperature(mut self, temperature: f32) -> Result<Self, DecisionError> {
+        if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+            return Err(DecisionError::Configuration(
+                "temperature must be between 0 and 2".into(),
+            ));
+        }
+        self.temperature = temperature;
+        Ok(self)
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
+
+    pub fn with_max_completion_tokens(mut self, tokens: u32) -> Result<Self, DecisionError> {
+        if tokens == 0 {
+            return Err(DecisionError::Configuration(
+                "maximum completion tokens must be greater than zero".into(),
+            ));
+        }
+        self.max_completion_tokens = Some(tokens);
+        Ok(self)
+    }
+
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Result<Self, DecisionError> {
+        let provider = provider.into();
+        if provider.trim().is_empty() {
+            return Err(DecisionError::Configuration(
+                "provider cannot be empty".into(),
+            ));
+        }
+        self.provider = Some(provider);
         Ok(self)
     }
 }
@@ -93,7 +166,13 @@ impl DecisionEngine for OpenAiDecisionEngine {
                     content: serde_json::to_string(observation)?,
                 },
             ],
-            temperature: 0,
+            temperature: self.temperature,
+            reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
+            max_completion_tokens: self.max_completion_tokens,
+            provider: self.provider.as_deref().map(|provider| ProviderRouting {
+                order: [provider],
+                allow_fallbacks: false,
+            }),
         };
         let mut request_builder = self.client.post(self.endpoint.clone());
         if let Some(api_key) = &self.api_key {
@@ -130,7 +209,24 @@ fn is_loopback(url: &Url) -> bool {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: [ChatMessage; 2],
-    temperature: u8,
+    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderRouting<'a>>,
+}
+
+#[derive(Serialize)]
+struct ProviderRouting<'a> {
+    order: [&'a str; 1],
+    allow_fallbacks: bool,
+}
+
+#[derive(Serialize)]
+struct Reasoning {
+    effort: ReasoningEffort,
 }
 
 #[derive(Serialize)]
@@ -156,7 +252,7 @@ struct ResponseMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenAiDecisionEngine;
+    use super::{ChatMessage, ChatRequest, OpenAiDecisionEngine, ReasoningEffort};
     use crate::{
         cognition::perceive,
         decision::{DecisionEngine, DecisionError},
@@ -179,6 +275,12 @@ mod tests {
             assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
             assert!(request.contains("self_description"));
             assert!(request.contains("progress"));
+            assert!(request.contains(r#""temperature":0.7"#));
+            assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
+            assert!(request.contains(r#""max_completion_tokens":512"#));
+            assert!(
+                request.contains(r#""provider":{"order":["Anthropic"],"allow_fallbacks":false}"#)
+            );
             assert!(
                 request
                     .to_ascii_lowercase()
@@ -204,7 +306,14 @@ mod tests {
         )
         .expect("engine")
         .with_api_key("test-secret")
-        .expect("API key");
+        .expect("API key")
+        .with_temperature(0.7)
+        .expect("temperature")
+        .with_reasoning_effort(ReasoningEffort::High)
+        .with_max_completion_tokens(512)
+        .expect("token limit")
+        .with_provider("Anthropic")
+        .expect("provider");
         let action = engine.decide(&observation).await.expect("action");
 
         assert_eq!(action, ProposedAction::Eat);
@@ -213,6 +322,31 @@ mod tests {
             ActionResult::Success(_)
         ));
         server.join().expect("server");
+    }
+
+    #[test]
+    fn optional_generation_fields_are_omitted_by_default() {
+        let request = ChatRequest {
+            model: "model",
+            messages: [
+                ChatMessage {
+                    role: "system",
+                    content: "system".into(),
+                },
+                ChatMessage {
+                    role: "user",
+                    content: "user".into(),
+                },
+            ],
+            temperature: 0.0,
+            reasoning: None,
+            max_completion_tokens: None,
+            provider: None,
+        };
+        let json = serde_json::to_string(&request).expect("request JSON");
+        assert!(!json.contains("reasoning"));
+        assert!(!json.contains("max_completion_tokens"));
+        assert!(!json.contains("provider"));
     }
 
     #[test]
@@ -225,6 +359,24 @@ mod tests {
             OpenAiDecisionEngine::new("https://example.com/v1", "model", Duration::from_secs(1))
                 .expect("HTTPS endpoint")
                 .with_api_key("  ")
+                .is_err()
+        );
+        assert!(
+            OpenAiDecisionEngine::new("https://example.com/v1", "model", Duration::from_secs(1))
+                .expect("HTTPS endpoint")
+                .with_temperature(2.1)
+                .is_err()
+        );
+        assert!(
+            OpenAiDecisionEngine::new("https://example.com/v1", "model", Duration::from_secs(1))
+                .expect("HTTPS endpoint")
+                .with_max_completion_tokens(0)
+                .is_err()
+        );
+        assert!(
+            OpenAiDecisionEngine::new("https://example.com/v1", "model", Duration::from_secs(1))
+                .expect("HTTPS endpoint")
+                .with_provider("  ")
                 .is_err()
         );
     }

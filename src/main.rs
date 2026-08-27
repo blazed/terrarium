@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 use terrarium::{
-    decision::{OpenAiDecisionEngine, RandomDecisionEngine},
+    decision::{OpenAiDecisionEngine, RandomDecisionEngine, ReasoningEffort},
     observer::{render_event, render_run_since, render_summary},
     persistence::{StoredRun, load_run, load_world, save_world},
     runner::{run_simulation, run_simulation_with_events},
@@ -9,7 +9,7 @@ use terrarium::{
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct RunArgs {
     seed: u64,
     ticks: u64,
@@ -18,17 +18,21 @@ struct RunArgs {
     decision: DecisionArgs,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum DecisionArgs {
     Random,
     OpenAi {
         model: String,
         base_url: String,
         api_key_env: Option<String>,
+        temperature: f32,
+        reasoning_effort: Option<ReasoningEffort>,
+        max_completion_tokens: Option<u32>,
+        provider: Option<String>,
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum Command {
     Run(RunArgs),
     Inspect(PathBuf),
@@ -37,13 +41,15 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api-key-env NAME]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
     MissingValue(String),
     #[error("invalid value for {flag}: {value}")]
     InvalidNumber { flag: String, value: String },
+    #[error("invalid LLM value for {flag}: {value}")]
+    InvalidLlmValue { flag: String, value: String },
     #[error("--days and --ticks cannot be used together")]
     ConflictingDuration,
     #[error("duration must be greater than zero")]
@@ -83,6 +89,10 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut llm_model = None;
     let mut llm_url = None;
     let mut llm_api_key_env = None;
+    let mut llm_temperature = None;
+    let mut llm_reasoning_effort = None;
+    let mut llm_max_completion_tokens = None;
+    let mut llm_provider = None;
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -99,6 +109,43 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             "--llm-model" => llm_model = Some(value),
             "--llm-url" => llm_url = Some(value),
             "--llm-api-key-env" => llm_api_key_env = Some(value),
+            "--llm-temperature" => {
+                let temperature = value
+                    .parse::<f32>()
+                    .map_err(|_| CliError::InvalidLlmValue {
+                        flag: flag.clone(),
+                        value: value.clone(),
+                    })?;
+                if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+                    return Err(CliError::InvalidLlmValue { flag, value });
+                }
+                llm_temperature = Some(temperature);
+            }
+            "--llm-reasoning-effort" => {
+                llm_reasoning_effort =
+                    Some(value.parse().map_err(|_| CliError::InvalidLlmValue {
+                        flag: flag.clone(),
+                        value: value.clone(),
+                    })?);
+            }
+            "--llm-max-tokens" => {
+                let tokens = value
+                    .parse::<u32>()
+                    .map_err(|_| CliError::InvalidLlmValue {
+                        flag: flag.clone(),
+                        value: value.clone(),
+                    })?;
+                if tokens == 0 {
+                    return Err(CliError::InvalidLlmValue { flag, value });
+                }
+                llm_max_completion_tokens = Some(tokens);
+            }
+            "--llm-provider" => {
+                if value.trim().is_empty() {
+                    return Err(CliError::InvalidLlmValue { flag, value });
+                }
+                llm_provider = Some(value.trim().into());
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -125,8 +172,18 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             model,
             base_url: llm_url.unwrap_or_else(|| "http://localhost:11434/v1".into()),
             api_key_env: llm_api_key_env,
+            temperature: llm_temperature.unwrap_or(0.0),
+            reasoning_effort: llm_reasoning_effort,
+            max_completion_tokens: llm_max_completion_tokens,
+            provider: llm_provider,
         },
-        None if llm_url.is_some() || llm_api_key_env.is_some() => {
+        None if llm_url.is_some()
+            || llm_api_key_env.is_some()
+            || llm_temperature.is_some()
+            || llm_reasoning_effort.is_some()
+            || llm_max_completion_tokens.is_some()
+            || llm_provider.is_some() =>
+        {
             return Err(CliError::MissingLlmModel);
         }
         None => DecisionArgs::Random,
@@ -195,9 +252,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     model,
                     base_url,
                     api_key_env,
+                    temperature,
+                    reasoning_effort,
+                    max_completion_tokens,
+                    provider,
                 } => {
                     let mut engine =
-                        OpenAiDecisionEngine::new(&base_url, model, Duration::from_secs(120))?;
+                        OpenAiDecisionEngine::new(&base_url, model, Duration::from_secs(120))?
+                            .with_temperature(temperature)?;
+                    if let Some(effort) = reasoning_effort {
+                        engine = engine.with_reasoning_effort(effort);
+                    }
+                    if let Some(tokens) = max_completion_tokens {
+                        engine = engine.with_max_completion_tokens(tokens)?;
+                    }
+                    if let Some(provider) = provider {
+                        engine = engine.with_provider(provider)?;
+                    }
                     if let Some(name) = api_key_env {
                         let key = std::env::var(&name)
                             .map_err(|_| CliError::MissingApiKey(name.clone()))?;
@@ -238,6 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 mod tests {
     use super::{CliError, Command, DecisionArgs, RunArgs, parse_args};
     use std::path::PathBuf;
+    use terrarium::decision::ReasoningEffort;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
@@ -276,6 +348,14 @@ mod tests {
                 "http://localhost:1234/v1",
                 "--llm-api-key-env",
                 "TEST_API_KEY",
+                "--llm-temperature",
+                "0.7",
+                "--llm-reasoning-effort",
+                "high",
+                "--llm-max-tokens",
+                "512",
+                "--llm-provider",
+                "Anthropic",
             ])),
             Ok(Command::Run(RunArgs {
                 seed: 814_921,
@@ -286,6 +366,10 @@ mod tests {
                     model: "qwen3:8b".into(),
                     base_url: "http://localhost:1234/v1".into(),
                     api_key_env: Some("TEST_API_KEY".into()),
+                    temperature: 0.7,
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    max_completion_tokens: Some(512),
+                    provider: Some("Anthropic".into()),
                 },
             }))
         );
@@ -328,6 +412,52 @@ mod tests {
         assert_eq!(
             parse_args(args(&["run", "--llm-api-key-env", "TEST_API_KEY"])),
             Err(CliError::MissingLlmModel)
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--llm-model",
+                "model",
+                "--llm-temperature",
+                "3"
+            ])),
+            Err(CliError::InvalidLlmValue {
+                flag: "--llm-temperature".into(),
+                value: "3".into(),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--llm-model",
+                "model",
+                "--llm-reasoning-effort",
+                "extreme"
+            ])),
+            Err(CliError::InvalidLlmValue {
+                flag: "--llm-reasoning-effort".into(),
+                value: "extreme".into(),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--llm-model",
+                "model",
+                "--llm-max-tokens",
+                "0"
+            ])),
+            Err(CliError::InvalidLlmValue {
+                flag: "--llm-max-tokens".into(),
+                value: "0".into(),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--llm-model", "model", "--llm-provider", ""])),
+            Err(CliError::InvalidLlmValue {
+                flag: "--llm-provider".into(),
+                value: "".into(),
+            })
         );
     }
 }

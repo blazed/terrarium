@@ -3,5 +3,5 @@ mod openai;
 mod random;
 
 pub use engine::{DecisionEngine, DecisionError};
-pub use openai::OpenAiDecisionEngine;
+pub use openai::{OpenAiDecisionEngine, ReasoningEffort};
 pub use random::RandomDecisionEngine;
