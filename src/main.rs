@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 use terrarium::{
-    decision::RandomDecisionEngine,
+    decision::{OpenAiDecisionEngine, RandomDecisionEngine},
     observer::render_run,
     persistence::{StoredRun, load_run, save_world},
     runner::run_simulation,
@@ -14,6 +14,17 @@ struct RunArgs {
     seed: u64,
     ticks: u64,
     database: Option<PathBuf>,
+    decision: DecisionArgs,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DecisionArgs {
+    Random,
+    OpenAi {
+        model: String,
+        base_url: String,
+        api_key_env: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -25,7 +36,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N] [--days N | --ticks N] [--database PATH]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api-key-env NAME]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -38,6 +49,10 @@ enum CliError {
     ZeroDuration,
     #[error("duration is too large")]
     DurationOverflow,
+    #[error("LLM options require --llm-model")]
+    MissingLlmModel,
+    #[error("environment variable {0} does not contain an API key")]
+    MissingApiKey(String),
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
@@ -60,6 +75,9 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut days = None;
     let mut ticks = None;
     let mut database = None;
+    let mut llm_model = None;
+    let mut llm_url = None;
+    let mut llm_api_key_env = None;
     while let Some(flag) = args.next() {
         let value = args
             .next()
@@ -69,6 +87,9 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             "--days" => days = Some(parse_number(&flag, value)?),
             "--ticks" => ticks = Some(parse_number(&flag, value)?),
             "--database" => database = Some(value.into()),
+            "--llm-model" => llm_model = Some(value),
+            "--llm-url" => llm_url = Some(value),
+            "--llm-api-key-env" => llm_api_key_env = Some(value),
             _ => return Err(CliError::Usage),
         }
     }
@@ -87,10 +108,22 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     if ticks == 0 {
         return Err(CliError::ZeroDuration);
     }
+    let decision = match llm_model {
+        Some(model) => DecisionArgs::OpenAi {
+            model,
+            base_url: llm_url.unwrap_or_else(|| "http://localhost:11434/v1".into()),
+            api_key_env: llm_api_key_env,
+        },
+        None if llm_url.is_some() || llm_api_key_env.is_some() => {
+            return Err(CliError::MissingLlmModel);
+        }
+        None => DecisionArgs::Random,
+    };
     Ok(RunArgs {
         seed,
         ticks,
         database,
+        decision,
     })
 }
 
@@ -120,6 +153,7 @@ fn render_stored_run(run: &StoredRun) -> Result<String, serde_json::Error> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
@@ -127,8 +161,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match parse_args(std::env::args().skip(1))? {
         Command::Run(args) => {
             let world = World::briar_glen(args.seed)?;
-            let mut engine = RandomDecisionEngine::new(args.seed);
-            let world = run_simulation(world, args.ticks, &mut engine).await?;
+            let world = match args.decision {
+                DecisionArgs::Random => {
+                    let mut engine = RandomDecisionEngine::new(args.seed);
+                    run_simulation(world, args.ticks, &mut engine).await?
+                }
+                DecisionArgs::OpenAi {
+                    model,
+                    base_url,
+                    api_key_env,
+                } => {
+                    let mut engine =
+                        OpenAiDecisionEngine::new(&base_url, model, Duration::from_secs(30))?;
+                    if let Some(name) = api_key_env {
+                        let key = std::env::var(&name)
+                            .map_err(|_| CliError::MissingApiKey(name.clone()))?;
+                        engine = engine
+                            .with_api_key(key)
+                            .map_err(|_| CliError::MissingApiKey(name))?;
+                    }
+                    run_simulation(world, args.ticks, &mut engine).await?
+                }
+            };
             if let Some(path) = args.database {
                 save_world(path, &world)?;
             }
@@ -141,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, Command, RunArgs, parse_args};
+    use super::{CliError, Command, DecisionArgs, RunArgs, parse_args};
     use std::path::PathBuf;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -164,11 +218,33 @@ mod tests {
                 seed: 1_234,
                 ticks: 8_640,
                 database: Some(PathBuf::from("run.sqlite")),
+                decision: DecisionArgs::Random,
             }))
         );
         assert_eq!(
             parse_args(args(&["inspect", "run.sqlite"])),
             Ok(Command::Inspect(PathBuf::from("run.sqlite")))
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--llm-model",
+                "qwen3:8b",
+                "--llm-url",
+                "http://localhost:1234/v1",
+                "--llm-api-key-env",
+                "TEST_API_KEY",
+            ])),
+            Ok(Command::Run(RunArgs {
+                seed: 814_921,
+                ticks: 288,
+                database: None,
+                decision: DecisionArgs::OpenAi {
+                    model: "qwen3:8b".into(),
+                    base_url: "http://localhost:1234/v1".into(),
+                    api_key_env: Some("TEST_API_KEY".into()),
+                },
+            }))
         );
     }
 
@@ -180,11 +256,20 @@ mod tests {
                 seed: 814_921,
                 ticks: 10_000,
                 database: None,
+                decision: DecisionArgs::Random,
             }))
         );
         assert_eq!(
             parse_args(args(&["run", "--days", "1", "--ticks", "2"])),
             Err(CliError::ConflictingDuration)
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--llm-url", "http://localhost:1234/v1"])),
+            Err(CliError::MissingLlmModel)
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--llm-api-key-env", "TEST_API_KEY"])),
+            Err(CliError::MissingLlmModel)
         );
     }
 }

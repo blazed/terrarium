@@ -4,6 +4,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum DecisionError {
+    #[error("invalid decision-engine configuration: {0}")]
+    Configuration(String),
+    #[error("decision-engine request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("decision-engine JSON was invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("decision-engine response contained no choice")]
+    MissingChoice,
     #[error("decision engine unavailable: {0}")]
     Unavailable(String),
 }

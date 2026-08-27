@@ -1,10 +1,10 @@
 use crate::{
     cognition::{ObservationError, perceive},
-    decision::{DecisionEngine, DecisionError},
-    sim::{Scheduler, World, WorldError},
+    decision::DecisionEngine,
+    sim::{ProposedAction, Scheduler, World, WorldError},
 };
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug, Error)]
 pub enum SimulationError {
@@ -12,8 +12,6 @@ pub enum SimulationError {
     World(#[from] WorldError),
     #[error(transparent)]
     Observation(#[from] ObservationError),
-    #[error(transparent)]
-    Decision(#[from] DecisionError),
 }
 
 pub async fn run_simulation(
@@ -26,7 +24,13 @@ pub async fn run_simulation(
         world.advance_tick()?;
         for agent in scheduler.agents_to_act(&world) {
             let observation = perceive(&world, agent)?;
-            let action = engine.decide(&observation).await?;
+            let action = match engine.decide(&observation).await {
+                Ok(action) => action,
+                Err(error) => {
+                    warn!(?agent, %error, "decision failed; waiting instead");
+                    ProposedAction::Wait
+                }
+            };
             debug!(?agent, ?action, "executing proposed action");
             world.execute(agent, action);
             world.validate()?;
@@ -39,8 +43,9 @@ pub async fn run_simulation(
 mod tests {
     use super::run_simulation;
     use crate::{
-        decision::RandomDecisionEngine,
-        sim::{EventKind, World},
+        cognition::AgentObservation,
+        decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
+        sim::{EventKind, ProposedAction, World},
     };
 
     #[tokio::test]
@@ -79,6 +84,26 @@ mod tests {
                 .any(|event| matches!(event.kind, EventKind::Waited { .. }))
         );
         left.validate().expect("valid world");
+    }
+
+    struct FailingEngine;
+
+    impl DecisionEngine for FailingEngine {
+        async fn decide(
+            &mut self,
+            _observation: &AgentObservation,
+        ) -> Result<ProposedAction, DecisionError> {
+            Err(DecisionError::Unavailable("test failure".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_failure_falls_back_to_wait() {
+        let world = World::briar_glen(1).expect("town");
+        let world = run_simulation(world, 1, &mut FailingEngine)
+            .await
+            .expect("simulation");
+        assert!(matches!(world.events()[0].kind, EventKind::Waited { .. }));
     }
 
     #[tokio::test]
