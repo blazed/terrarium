@@ -1,6 +1,6 @@
 use super::{
-    ActionRejection, ActionResult, Agent, AgentId, Event, EventId, EventKind, Goal, GoalKind,
-    Location, LocationId, MAX_TALK_MESSAGE_CHARS, Needs, ObservationTarget, Occupation,
+    ActionRejection, ActionResult, Agent, AgentId, DialogueTone, Event, EventId, EventKind, Goal,
+    GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS, Needs, ObservationTarget, Occupation,
     Personality, ProposedAction, Relationship, Tick, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -138,7 +138,9 @@ impl World {
                     status: vary_need(0.35),
                     energy: vary_need(0.8),
                 },
+                mood: 0.0,
                 relationships: BTreeMap::new(),
+                beliefs: BTreeMap::new(),
                 goals: vec![
                     Goal::new(format!("Succeed as {name}"), GoalKind::Livelihood),
                     Goal::new("Strengthen community ties", GoalKind::Community),
@@ -194,6 +196,8 @@ impl World {
         let elapsed = proposed.0 - self.tick.0;
         for agent in self.agents.values_mut() {
             agent.needs.decay(elapsed);
+            agent.decay_mood(elapsed);
+            agent.decay_beliefs(elapsed);
         }
         self.tick = proposed;
         Ok(())
@@ -374,7 +378,11 @@ impl World {
                     to: destination,
                 }
             }
-            ProposedAction::Talk { target, message } => {
+            ProposedAction::Talk {
+                target,
+                tone,
+                message,
+            } => {
                 if target == actor {
                     return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
                 }
@@ -411,6 +419,7 @@ impl World {
                 EventKind::Spoke {
                     speaker: actor,
                     listener: target,
+                    tone,
                     message: message.into(),
                 }
             }
@@ -538,7 +547,7 @@ impl World {
                     agent.needs.energy = (agent.needs.energy - 0.01).max(0.0);
                 }
             }
-            EventKind::Spoke { listener, .. } => {
+            EventKind::Spoke { listener, tone, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     Needs::restore(&mut agent.needs.companionship, 0.12);
                     Needs::restore(&mut agent.needs.status, 0.01);
@@ -546,8 +555,8 @@ impl World {
                 if let Some(agent) = self.agents.get_mut(listener) {
                     Needs::restore(&mut agent.needs.companionship, 0.08);
                 }
-                self.strengthen_relationship(actor, *listener, 1.0);
-                self.strengthen_relationship(*listener, actor, 0.75);
+                self.apply_dialogue_relationship(actor, *listener, *tone, 1.0);
+                self.apply_dialogue_relationship(*listener, actor, *tone, 0.75);
             }
             EventKind::Observed { .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
@@ -580,19 +589,33 @@ impl World {
         }
     }
 
-    fn strengthen_relationship(&mut self, source: AgentId, target: AgentId, amount: f32) {
+    fn apply_dialogue_relationship(
+        &mut self,
+        source: AgentId,
+        target: AgentId,
+        tone: DialogueTone,
+        amount: f32,
+    ) {
         if let Some(agent) = self.agents.get_mut(&source) {
             let warmth = 0.75 + 0.5 * agent.personality.agreeableness;
             let credibility = 0.75 + 0.5 * agent.personality.honesty;
+            let (affection, trust, respect, suspicion) = match tone {
+                DialogueTone::Friendly => (0.03, 0.012, 0.006, -0.01),
+                DialogueTone::Supportive => (0.02, 0.025, 0.012, -0.02),
+                DialogueTone::Neutral => (0.02, 0.015, 0.005, -0.01),
+                DialogueTone::Tense => (-0.025, -0.02, -0.01, 0.025),
+            };
             let relationship = agent
                 .relationships
                 .entry(target)
                 .or_insert(Relationship::NEUTRAL);
-            relationship.affection = (relationship.affection + 0.02 * amount * warmth).min(1.0);
-            relationship.trust = (relationship.trust + 0.015 * amount * credibility).min(1.0);
-            relationship.respect = (relationship.respect + 0.005 * amount).min(1.0);
+            relationship.affection =
+                (relationship.affection + affection * amount * warmth).clamp(-1.0, 1.0);
+            relationship.trust =
+                (relationship.trust + trust * amount * credibility).clamp(-1.0, 1.0);
+            relationship.respect = (relationship.respect + respect * amount).clamp(-1.0, 1.0);
             relationship.suspicion =
-                (relationship.suspicion - 0.01 * amount * credibility).max(-1.0);
+                (relationship.suspicion + suspicion * amount * credibility).clamp(-1.0, 1.0);
         }
     }
 
@@ -619,9 +642,42 @@ impl World {
             location,
             kind,
         };
+        self.apply_mood_effects(&event.kind);
         self.events.push(event.clone());
         self.remember(&event);
         event
+    }
+
+    fn apply_mood_effects(&mut self, kind: &EventKind) {
+        let mut adjust = |id: AgentId, amount| {
+            if let Some(agent) = self.agents.get_mut(&id) {
+                agent.adjust_mood(amount);
+            }
+        };
+        match kind {
+            EventKind::Spoke {
+                speaker,
+                listener,
+                tone,
+                ..
+            } => {
+                let (speaker_change, listener_change) = match tone {
+                    DialogueTone::Friendly => (0.05, 0.04),
+                    DialogueTone::Supportive => (0.06, 0.08),
+                    DialogueTone::Neutral => (0.01, 0.01),
+                    DialogueTone::Tense => (-0.08, -0.06),
+                };
+                adjust(*speaker, speaker_change);
+                adjust(*listener, listener_change);
+            }
+            EventKind::Ate { agent } => adjust(*agent, 0.06),
+            EventKind::Rested { agent } => adjust(*agent, 0.08),
+            EventKind::Worked { agent } => adjust(*agent, 0.03),
+            EventKind::Observed { observer, .. } => adjust(*observer, 0.02),
+            EventKind::GoalCompleted { agent, .. } => adjust(*agent, 0.15),
+            EventKind::ActionRejected { agent, .. } => adjust(*agent, -0.06),
+            EventKind::Moved { .. } | EventKind::Waited { .. } => {}
+        }
     }
 
     fn remember(&mut self, event: &Event) {
@@ -656,11 +712,26 @@ impl World {
             witnesses.extend(location.agents.iter().copied());
         }
 
+        let evidence = match &event.kind {
+            EventKind::Spoke { speaker, tone, .. } => Some(match tone {
+                DialogueTone::Friendly => (*speaker, 0.08, 0.0, -0.03),
+                DialogueTone::Supportive => (*speaker, 0.06, 0.06, -0.03),
+                DialogueTone::Neutral => (*speaker, 0.04, 0.0, 0.0),
+                DialogueTone::Tense => (*speaker, 0.02, -0.03, 0.12),
+            }),
+            EventKind::Worked { agent } => Some((*agent, 0.0, 0.08, 0.0)),
+            _ => None,
+        };
         for witness in witnesses {
             if let Some(agent) = self.agents.get_mut(&witness) {
                 agent.memories.push(event.clone());
                 let excess = agent.memories.len().saturating_sub(MEMORY_LIMIT);
                 agent.memories.drain(..excess);
+                if let Some((subject, sociability, reliability, hostility)) = evidence
+                    && witness != subject
+                {
+                    agent.learn_about(subject, sociability, reliability, hostility);
+                }
             }
         }
     }
@@ -706,7 +777,10 @@ impl World {
                     memberships.get(id).copied().unwrap_or_default()
                 )));
             }
-            if !agent.personality.is_normalized() || !agent.needs.is_normalized() {
+            if !agent.personality.is_normalized()
+                || !agent.needs.is_normalized()
+                || !(-1.0..=1.0).contains(&agent.mood)
+            {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has non-normalized traits"
                 )));
@@ -716,6 +790,13 @@ impl World {
             }) {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has an invalid relationship"
+                )));
+            }
+            if agent.beliefs.iter().any(|(subject, belief)| {
+                subject == id || !self.agents.contains_key(subject) || !belief.is_normalized()
+            }) {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has an invalid belief"
                 )));
             }
             if agent.goals.iter().any(|goal| {
@@ -738,7 +819,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, AgentId, EventKind, MAX_TALK_MESSAGE_CHARS,
+        ActionRejection, ActionResult, AgentId, DialogueTone, EventKind, MAX_TALK_MESSAGE_CHARS,
         ObservationTarget, ProposedAction, Relationship, Tick, World, WorldError,
     };
     use uuid::Uuid;
@@ -791,6 +872,7 @@ mod tests {
             actor,
             ProposedAction::Talk {
                 target: listener,
+                tone: DialogueTone::Neutral,
                 message: "Hello.".into(),
             },
         );
@@ -814,6 +896,39 @@ mod tests {
     }
 
     #[test]
+    fn events_change_mood_and_time_returns_it_toward_neutral() {
+        let mut world = World::briar_glen(4).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let location = world.agents[&actor].location;
+
+        for _ in 0..4 {
+            world.execute(
+                actor,
+                ProposedAction::Observe {
+                    target: ObservationTarget::Location(location),
+                },
+            );
+        }
+        assert!((world.agents[&actor].mood - 0.23).abs() < f32::EPSILON * 4.0);
+
+        world.execute(
+            actor,
+            ProposedAction::Talk {
+                target: actor,
+                tone: DialogueTone::Neutral,
+                message: "Hello, me.".into(),
+            },
+        );
+        assert!((world.agents[&actor].mood - 0.17).abs() < f32::EPSILON * 4.0);
+
+        world.advance_to(Tick(10)).expect("time advances");
+        assert!((world.agents[&actor].mood - 0.15).abs() < f32::EPSILON * 4.0);
+        world.validate().expect("bounded mood");
+        world.agents.get_mut(&actor).expect("actor").mood = 1.1;
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+    }
+
+    #[test]
     fn successful_actions_complete_goals_once() {
         let mut world = World::briar_glen(4).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
@@ -825,6 +940,7 @@ mod tests {
                 actor,
                 ProposedAction::Talk {
                     target: listener,
+                    tone: DialogueTone::Neutral,
                     message: "Hello.".into(),
                 },
             );
@@ -851,6 +967,7 @@ mod tests {
             actor,
             ProposedAction::Talk {
                 target: listener,
+                tone: DialogueTone::Neutral,
                 message: "Again.".into(),
             },
         );
@@ -972,11 +1089,17 @@ mod tests {
             speaker,
             ProposedAction::Talk {
                 target: listener,
+                tone: DialogueTone::Neutral,
                 message: "Did you hear the bells?".into(),
             },
         );
 
         assert!(world.agents[&remote].memories.is_empty());
+        assert!(world.agents[&remote].beliefs.is_empty());
+        assert!(!world.agents[&speaker].beliefs.contains_key(&speaker));
+        let listener_belief = world.agents[&listener].beliefs[&speaker];
+        assert!(listener_belief.sociability > 0.5);
+        assert_eq!(listener_belief.confidence, 0.15);
         assert!(
             world.agents[&speaker]
                 .memories
@@ -989,6 +1112,24 @@ mod tests {
                 .iter()
                 .any(|memory| matches!(memory.kind, EventKind::Spoke { .. }))
         );
+
+        world.append_event(Some(home), EventKind::Worked { agent: speaker });
+        let belief = world.agents[&listener].beliefs[&speaker];
+        assert!(belief.reliability > 0.5);
+        assert_eq!(belief.confidence, 0.3);
+        world.advance_to(Tick(10)).expect("time advances");
+        assert!((world.agents[&listener].beliefs[&speaker].confidence - 0.29).abs() < f32::EPSILON);
+        world.validate().expect("valid beliefs");
+
+        world
+            .agents
+            .get_mut(&listener)
+            .expect("listener")
+            .beliefs
+            .get_mut(&speaker)
+            .expect("belief")
+            .confidence = 1.1;
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 
     #[test]
@@ -1006,6 +1147,7 @@ mod tests {
                     speaker,
                     ProposedAction::Talk {
                         target: listener,
+                        tone: DialogueTone::Neutral,
                         message: "Good to see you.".into(),
                     }
                 ),
@@ -1051,6 +1193,7 @@ mod tests {
             .honesty = 0.0;
         let talk = ProposedAction::Talk {
             target: listener,
+            tone: DialogueTone::Neutral,
             message: "Good to see you.".into(),
         };
 
@@ -1062,6 +1205,42 @@ mod tests {
         assert!(warm_view.affection > cold_view.affection);
         assert!(warm_view.trust > cold_view.trust);
         assert!(warm_view.suspicion < cold_view.suspicion);
+    }
+
+    #[test]
+    fn dialogue_tone_changes_relationship_effects() {
+        let neutral = World::briar_glen(42).expect("town");
+        let residents = neutral.agents.keys().copied().collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[2];
+        let mut friendly = neutral.clone();
+        let mut supportive = neutral.clone();
+        let mut tense = neutral;
+
+        for (world, tone) in [
+            (&mut friendly, DialogueTone::Friendly),
+            (&mut supportive, DialogueTone::Supportive),
+            (&mut tense, DialogueTone::Tense),
+        ] {
+            world.execute(
+                speaker,
+                ProposedAction::Talk {
+                    target: listener,
+                    tone,
+                    message: "Hello.".into(),
+                },
+            );
+        }
+
+        assert!(friendly.agents[&speaker].mood > 0.0);
+        assert!(supportive.agents[&listener].mood > supportive.agents[&speaker].mood);
+        assert!(tense.agents[&speaker].mood < 0.0);
+        let friendly = friendly.agents[&speaker].relationships[&listener];
+        let supportive = supportive.agents[&speaker].relationships[&listener];
+        let tense = tense.agents[&speaker].relationships[&listener];
+        assert!(friendly.affection > supportive.affection);
+        assert!(supportive.trust > friendly.trust);
+        assert!(tense.affection < 0.0 && tense.trust < 0.0 && tense.suspicion > 0.0);
     }
 
     #[test]
@@ -1086,6 +1265,7 @@ mod tests {
                     actor,
                     ProposedAction::Talk {
                         target: listener,
+                        tone: DialogueTone::Neutral,
                         message,
                     },
                 ),
@@ -1097,6 +1277,7 @@ mod tests {
             actor,
             ProposedAction::Talk {
                 target: listener,
+                tone: DialogueTone::Friendly,
                 message: "  A concise greeting.  ".into(),
             },
         );
@@ -1116,6 +1297,7 @@ mod tests {
                 actor,
                 ProposedAction::Talk {
                     target: actor,
+                    tone: DialogueTone::Neutral,
                     message: "Hello, me.".into(),
                 }
             ),
@@ -1168,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_action_changes_only_history() {
+    fn rejected_action_changes_only_history_and_actor_mood() {
         let mut world = World::briar_glen(5).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let agents_before = world.agents.clone();
@@ -1180,11 +1362,14 @@ mod tests {
                 actor,
                 ProposedAction::Talk {
                     target: absent,
+                    tone: DialogueTone::Neutral,
                     message: "Hello".into(),
                 },
             ),
             ActionResult::Rejected(ActionRejection::UnknownAgent(absent))
         );
+        assert_eq!(world.agents[&actor].mood, -0.06);
+        world.agents.get_mut(&actor).expect("actor").mood = 0.0;
         assert_eq!(world.agents, agents_before);
         assert_eq!(world.locations, locations_before);
         assert!(matches!(
@@ -1210,6 +1395,8 @@ mod tests {
             world.execute(actor, ProposedAction::Move { destination }),
             ActionResult::Rejected(ActionRejection::Disconnected { .. })
         ));
+        assert_eq!(world.agents[&actor].mood, -0.06);
+        world.agents.get_mut(&actor).expect("actor").mood = 0.0;
         assert_eq!(world.agents, agents_before);
         assert_eq!(world.locations, locations_before);
     }
@@ -1238,6 +1425,7 @@ mod tests {
                 actor,
                 ProposedAction::Talk {
                     target,
+                    tone: DialogueTone::Neutral,
                     message: "Can you hear me?".into(),
                 }
             ),

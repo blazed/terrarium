@@ -7,11 +7,12 @@ use std::{net::IpAddr, time::Duration};
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
-Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest.
-For talk, write natural dialogue grounded only in the current observation and relevant memories. Keep it to one printable line of at most 200 characters.
+Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
+Beliefs are subjective estimates from witnessed behavior; weigh sociability, reliability, and hostility by confidence, never as objective facts.
+For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation and relevant memories. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
-{"action":"talk","target":"agent UUID","message":"non-empty text"}
+{"action":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}
 {"action":"observe","target":{"target":"agent","id":"agent UUID"}}
 {"action":"observe","target":{"target":"location","id":"location UUID"}}
 {"action":"eat"}
@@ -279,6 +280,9 @@ mod tests {
             assert!(request.contains("progress"));
             assert!(request.contains("relevant memories"));
             assert!(request.contains("200 characters"));
+            assert!(request.contains("friendly|supportive|neutral|tense"));
+            assert!(request.contains("Mood ranges from -1"));
+            assert!(request.contains("Beliefs are subjective estimates"));
             assert!(request.contains(r#""temperature":0.7"#));
             assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
             assert!(request.contains(r#""max_completion_tokens":512"#));

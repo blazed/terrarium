@@ -7,9 +7,10 @@ mod scheduler;
 mod world;
 
 pub use action::{
-    ActionRejection, ActionResult, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
+    ActionRejection, ActionResult, DialogueTone, MAX_TALK_MESSAGE_CHARS, ObservationTarget,
+    ProposedAction,
 };
-pub use agent::{Agent, Goal, GoalKind, Needs, Occupation, Personality};
+pub use agent::{Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality};
 pub use event::{Event, EventKind};
 pub use location::Location;
 pub use relationship::Relationship;

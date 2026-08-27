@@ -1,8 +1,9 @@
 use crate::sim::{
-    AgentId, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget, Occupation,
+    AgentId, Belief, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget, Occupation,
     Personality, Relationship, Tick, World,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,7 +14,7 @@ pub struct AgentObservation {
     pub visible_agents: Vec<VisibleAgent>,
     pub goals: Vec<GoalStatus>,
     pub relevant_memories: Vec<String>,
-    pub beliefs: Vec<String>,
+    pub beliefs: BTreeMap<AgentId, Belief>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ pub struct SelfDescription {
     pub workplace: Option<LocationSummary>,
     pub personality: Personality,
     pub needs: Needs,
+    pub mood: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +141,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             workplace,
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
+            mood: agent.mood,
         },
         current_location: LocationDescription {
             id: location.id,
@@ -161,7 +164,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             .iter()
             .map(|memory| describe_memory(world, observer, memory))
             .collect(),
-        beliefs: Vec::new(),
+        beliefs: agent.beliefs.clone(),
     })
 }
 
@@ -193,23 +196,29 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
         EventKind::Spoke {
             speaker,
             listener,
+            tone,
             message,
         } if *speaker == observer => {
-            format!("You said to {}: {message:?}", agent_name(*listener))
+            format!(
+                "You said to {} [{tone}]: {message:?}",
+                agent_name(*listener)
+            )
         }
         EventKind::Spoke {
             speaker,
             listener,
+            tone,
             message,
         } if *listener == observer => {
-            format!("{} said to you: {message:?}", agent_name(*speaker))
+            format!("{} said to you [{tone}]: {message:?}", agent_name(*speaker))
         }
         EventKind::Spoke {
             speaker,
             listener,
+            tone,
             message,
         } => format!(
-            "{} said to {}: {message:?}",
+            "{} said to {} [{tone}]: {message:?}",
             agent_name(*speaker),
             agent_name(*listener)
         ),
@@ -257,7 +266,8 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 mod tests {
     use super::{ObservationError, perceive};
     use crate::sim::{
-        ActionResult, AgentId, GoalKind, ObservationTarget, ProposedAction, Relationship, World,
+        ActionResult, AgentId, Belief, DialogueTone, GoalKind, ObservationTarget, ProposedAction,
+        Relationship, World,
     };
     use uuid::Uuid;
 
@@ -318,7 +328,17 @@ mod tests {
                 .iter()
                 .all(|agent| agent.id != hidden)
         );
+        assert_eq!(
+            observation.self_description.mood,
+            world.agents[&observer].mood
+        );
         assert_eq!(observation.visible_agents.len(), 6);
+        assert!(
+            serde_json::to_value(&observation.visible_agents[0])
+                .expect("visible agent JSON")
+                .get("mood")
+                .is_none()
+        );
         assert!(observation.relevant_memories[0].contains("moved from"));
         assert!(observation.beliefs.is_empty());
     }
@@ -354,6 +374,32 @@ mod tests {
                     ..Relationship::NEUTRAL
                 },
             );
+        world
+            .agents
+            .get_mut(&observer)
+            .expect("observer")
+            .beliefs
+            .insert(
+                target,
+                Belief {
+                    sociability: 0.9,
+                    confidence: 0.8,
+                    ..Belief::default()
+                },
+            );
+        world
+            .agents
+            .get_mut(&target)
+            .expect("target")
+            .beliefs
+            .insert(
+                observer,
+                Belief {
+                    hostility: 0.9,
+                    confidence: 0.8,
+                    ..Belief::default()
+                },
+            );
 
         let observation = perceive(&world, observer).expect("observation");
         assert_eq!(
@@ -375,6 +421,8 @@ mod tests {
                 .relationship,
             Relationship::NEUTRAL
         );
+        assert_eq!(observation.beliefs[&target].sociability, 0.9);
+        assert_eq!(observation.beliefs[&target].hostility, 0.0);
     }
 
     #[test]
@@ -401,6 +449,7 @@ mod tests {
             speaker,
             ProposedAction::Talk {
                 target: listener,
+                tone: DialogueTone::Friendly,
                 message: "The lantern is lit.".into(),
             },
         );

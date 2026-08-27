@@ -138,6 +138,38 @@ impl<'de> Deserialize<'de> for Goal {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Belief {
+    pub sociability: f32,
+    pub reliability: f32,
+    pub hostility: f32,
+    pub confidence: f32,
+}
+
+impl Default for Belief {
+    fn default() -> Self {
+        Self {
+            sociability: 0.5,
+            reliability: 0.5,
+            hostility: 0.0,
+            confidence: 0.0,
+        }
+    }
+}
+
+impl Belief {
+    pub fn is_normalized(self) -> bool {
+        [
+            self.sociability,
+            self.reliability,
+            self.hostility,
+            self.confidence,
+        ]
+        .into_iter()
+        .all(|value| (0.0..=1.0).contains(&value))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
@@ -149,15 +181,56 @@ pub struct Agent {
     pub location: LocationId,
     pub personality: Personality,
     pub needs: Needs,
+    #[serde(default)]
+    pub mood: f32,
     pub relationships: BTreeMap<AgentId, Relationship>,
+    #[serde(default)]
+    pub beliefs: BTreeMap<AgentId, Belief>,
     pub goals: Vec<Goal>,
     #[serde(default)]
     pub memories: Vec<Event>,
 }
 
+impl Agent {
+    pub(super) fn adjust_mood(&mut self, amount: f32) {
+        self.mood = (self.mood + amount).clamp(-1.0, 1.0);
+    }
+
+    pub(super) fn decay_mood(&mut self, ticks: u64) {
+        let decay = 0.002 * ticks as f32;
+        self.mood = if self.mood > 0.0 {
+            (self.mood - decay).max(0.0)
+        } else {
+            (self.mood + decay).min(0.0)
+        };
+    }
+
+    pub(super) fn learn_about(
+        &mut self,
+        subject: AgentId,
+        sociability: f32,
+        reliability: f32,
+        hostility: f32,
+    ) {
+        let belief = self.beliefs.entry(subject).or_default();
+        belief.sociability = (belief.sociability + sociability).clamp(0.0, 1.0);
+        belief.reliability = (belief.reliability + reliability).clamp(0.0, 1.0);
+        belief.hostility = (belief.hostility + hostility).clamp(0.0, 1.0);
+        belief.confidence = (belief.confidence + 0.15).min(1.0);
+    }
+
+    pub(super) fn decay_beliefs(&mut self, ticks: u64) {
+        let decay = 0.001 * ticks as f32;
+        for belief in self.beliefs.values_mut() {
+            belief.confidence = (belief.confidence - decay).max(0.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Goal, GoalKind};
+    use super::{Agent, Goal, GoalKind};
+    use crate::sim::World;
 
     #[test]
     fn legacy_string_goals_remain_loadable() {
@@ -165,5 +238,18 @@ mod tests {
         assert_eq!(goal.description, "Succeed as Alice");
         assert_eq!(goal.kind, GoalKind::Livelihood);
         assert_eq!(goal.progress, 0.0);
+    }
+
+    #[test]
+    fn legacy_agents_default_new_cognition_state() {
+        let world = World::briar_glen(1).expect("town");
+        let mut value = serde_json::to_value(world.agents.values().next().expect("resident"))
+            .expect("agent JSON");
+        let object = value.as_object_mut().expect("agent object");
+        object.remove("mood");
+        object.remove("beliefs");
+        let agent: Agent = serde_json::from_value(value).expect("legacy agent");
+        assert_eq!(agent.mood, 0.0);
+        assert!(agent.beliefs.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, VisibleAgent},
-    sim::{GoalKind, ObservationTarget, ProposedAction},
+    sim::{DialogueTone, GoalKind, ObservationTarget, ProposedAction},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -28,6 +28,7 @@ impl DecisionEngine for RandomDecisionEngine {
 
         let needs = &observation.self_description.needs;
         let personality = &observation.self_description.personality;
+        let mood = observation.self_description.mood;
         let connected_to = |target| {
             observation
                 .current_location
@@ -48,12 +49,21 @@ impl DecisionEngine for RandomDecisionEngine {
         };
         let relationship_score = |agent: &VisibleAgent| {
             let relationship = agent.relationship;
+            let belief = observation
+                .beliefs
+                .get(&agent.id)
+                .map(|belief| {
+                    0.5 * belief.confidence
+                        * (belief.sociability - 0.5 + belief.reliability - 0.5 - belief.hostility)
+                })
+                .unwrap_or_default();
             relationship.affection
                 + relationship.trust
                 + relationship.respect
                 + relationship.attraction
                 - relationship.fear
                 - relationship.suspicion
+                + belief
         };
         let preferred_companion = || {
             observation
@@ -96,10 +106,7 @@ impl DecisionEngine for RandomDecisionEngine {
             && !observation.visible_agents.is_empty()
         {
             let companion = preferred_companion();
-            return Ok(ProposedAction::Talk {
-                target: companion.id,
-                message: dialogue(observation, companion),
-            });
+            return Ok(talk(observation, companion));
         }
         if needs.safety < 0.1 + 0.2 * personality.neuroticism {
             return Ok(ProposedAction::Observe {
@@ -150,11 +157,7 @@ impl DecisionEngine for RandomDecisionEngine {
                     }
                 }
                 GoalKind::Community if !observation.visible_agents.is_empty() => {
-                    let companion = preferred_companion();
-                    return Ok(ProposedAction::Talk {
-                        target: companion.id,
-                        message: dialogue(observation, companion),
-                    });
+                    return Ok(talk(observation, preferred_companion()));
                 }
                 GoalKind::Exploration => {
                     return Ok(ProposedAction::Observe {
@@ -189,10 +192,10 @@ impl DecisionEngine for RandomDecisionEngine {
         }
 
         let weights = [
-            0.5 + personality.openness + personality.impulsiveness,
-            0.5 + personality.agreeableness,
-            0.5 + personality.openness + personality.neuroticism,
-            1.5 - personality.impulsiveness,
+            0.5 + personality.openness + personality.impulsiveness + mood.max(0.0),
+            0.5 + personality.agreeableness + mood.max(0.0),
+            0.5 + personality.openness + personality.neuroticism + (-mood).max(0.0),
+            1.5 - personality.impulsiveness + (-mood).max(0.0),
         ];
         let mut choice = rng.random::<f32>() * weights.iter().sum::<f32>();
         let action = weights
@@ -210,13 +213,7 @@ impl DecisionEngine for RandomDecisionEngine {
                     destination: observation.current_location.connected[index].id,
                 }
             }
-            1 if !observation.visible_agents.is_empty() => {
-                let companion = preferred_companion();
-                ProposedAction::Talk {
-                    target: companion.id,
-                    message: dialogue(observation, companion),
-                }
-            }
+            1 if !observation.visible_agents.is_empty() => talk(observation, preferred_companion()),
             2 => {
                 let target = if observation.visible_agents.is_empty() || rng.random_bool(0.5) {
                     ObservationTarget::Location(observation.current_location.id)
@@ -231,7 +228,8 @@ impl DecisionEngine for RandomDecisionEngine {
     }
 }
 
-fn dialogue(observation: &AgentObservation, companion: &VisibleAgent) -> String {
+fn talk(observation: &AgentObservation, companion: &VisibleAgent) -> ProposedAction {
+    let tone = dialogue_tone(observation, companion);
     let personality = &observation.self_description.personality;
     let dominant = [
         personality.openness,
@@ -250,20 +248,77 @@ fn dialogue(observation: &AgentObservation, companion: &VisibleAgent) -> String 
     let name = &companion.name;
     let location = &observation.current_location.name;
 
-    match (dominant, alternate) {
-        (0, true) => format!("What have you noticed around {location}, {name}?"),
-        (0, false) => format!("What else might be worth exploring, {name}?"),
-        (1, true) => format!("It's good to see you, {name}."),
-        (1, false) => format!("How are you doing today, {name}?"),
-        (2, true) => format!("Does everything seem all right here, {name}?"),
-        (2, false) => format!("Do you feel safe around {location}, {name}?"),
-        (3, true) => format!("I'd value your honest opinion, {name}."),
-        (3, false) => format!("Let me speak plainly, {name}: how are things?"),
-        (4, true) => format!("What are you working toward, {name}?"),
-        (4, false) => format!("How is your work going, {name}?"),
-        (5, true) => format!("What should we do next, {name}?"),
-        (5, false) => format!("Let's try something different today, {name}."),
+    let message = match (tone, dominant, alternate) {
+        (DialogueTone::Friendly, _, true) => format!("It's good to see you, {name}."),
+        (DialogueTone::Friendly, _, false) => format!("How are you doing today, {name}?"),
+        (DialogueTone::Supportive, _, true) => format!("How can I help you today, {name}?"),
+        (DialogueTone::Supportive, _, false) => {
+            format!("I'm here if you need support around {location}, {name}.")
+        }
+        (DialogueTone::Tense, _, true) => format!("We need to clear something up, {name}."),
+        (DialogueTone::Tense, _, false) => format!("I don't trust this situation, {name}."),
+        (DialogueTone::Neutral, 0, true) => {
+            format!("What have you noticed around {location}, {name}?")
+        }
+        (DialogueTone::Neutral, 0, false) => {
+            format!("What else might be worth exploring, {name}?")
+        }
+        (DialogueTone::Neutral, 1, true) => format!("It's good to see you, {name}."),
+        (DialogueTone::Neutral, 1, false) => format!("How are you doing today, {name}?"),
+        (DialogueTone::Neutral, 2, true) => {
+            format!("Does everything seem all right here, {name}?")
+        }
+        (DialogueTone::Neutral, 2, false) => {
+            format!("Do you feel safe around {location}, {name}?")
+        }
+        (DialogueTone::Neutral, 3, true) => format!("I'd value your honest opinion, {name}."),
+        (DialogueTone::Neutral, 3, false) => {
+            format!("Let me speak plainly, {name}: how are things?")
+        }
+        (DialogueTone::Neutral, 4, true) => format!("What are you working toward, {name}?"),
+        (DialogueTone::Neutral, 4, false) => format!("How is your work going, {name}?"),
+        (DialogueTone::Neutral, 5, true) => format!("What should we do next, {name}?"),
+        (DialogueTone::Neutral, 5, false) => {
+            format!("Let's try something different today, {name}.")
+        }
         _ => unreachable!(),
+    };
+    ProposedAction::Talk {
+        target: companion.id,
+        tone,
+        message,
+    }
+}
+
+fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> DialogueTone {
+    let personality = &observation.self_description.personality;
+    let relationship = companion.relationship;
+    let belief = observation
+        .beliefs
+        .get(&companion.id)
+        .copied()
+        .unwrap_or_default();
+    let closeness = relationship.affection + relationship.trust + relationship.respect
+        - relationship.fear
+        - relationship.suspicion;
+
+    if closeness < -0.5
+        || belief.hostility * belief.confidence > 0.35
+        || (observation.self_description.mood < -0.5 && personality.agreeableness < 0.7)
+        || (personality.impulsiveness > 0.75 && personality.agreeableness < 0.35)
+    {
+        DialogueTone::Tense
+    } else if belief.reliability * belief.confidence > 0.35
+        || personality.agreeableness + personality.honesty >= 1.25
+    {
+        DialogueTone::Supportive
+    } else if observation.self_description.mood > 0.35
+        || closeness > 0.4
+        || personality.agreeableness >= 0.55
+    {
+        DialogueTone::Friendly
+    } else {
+        DialogueTone::Neutral
     }
 }
 
@@ -272,8 +327,60 @@ mod tests {
     use super::{DecisionEngine, RandomDecisionEngine};
     use crate::{
         cognition::perceive,
-        sim::{GoalKind, ObservationTarget, ProposedAction, Relationship, Tick, World},
+        sim::{
+            Belief, DialogueTone, GoalKind, ObservationTarget, ProposedAction, Relationship, Tick,
+            World,
+        },
     };
+
+    #[tokio::test]
+    async fn confident_beliefs_shape_companion_and_tone() {
+        let world = World::briar_glen(17).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.needs.food = 0.5;
+        observation.self_description.needs.energy = 0.5;
+        observation.self_description.needs.companionship = 0.1;
+        observation.self_description.needs.safety = 0.5;
+        for visible in &mut observation.visible_agents {
+            visible.relationship = Relationship::NEUTRAL;
+        }
+        let preferred = observation.visible_agents[0].id;
+        observation.beliefs.insert(
+            preferred,
+            Belief {
+                sociability: 1.0,
+                reliability: 1.0,
+                hostility: 0.0,
+                confidence: 1.0,
+            },
+        );
+        let mut engine = RandomDecisionEngine::new(17);
+        assert!(matches!(
+            engine.decide(&observation).await.expect("decision"),
+            ProposedAction::Talk { target, .. } if target == preferred
+        ));
+
+        observation
+            .visible_agents
+            .retain(|agent| agent.id == preferred);
+        observation.beliefs.insert(
+            preferred,
+            Belief {
+                sociability: 0.5,
+                reliability: 0.5,
+                hostility: 1.0,
+                confidence: 1.0,
+            },
+        );
+        assert!(matches!(
+            engine.decide(&observation).await.expect("decision"),
+            ProposedAction::Talk {
+                tone: DialogueTone::Tense,
+                ..
+            }
+        ));
+    }
 
     #[tokio::test]
     async fn urgent_needs_and_time_drive_routines() {
@@ -355,7 +462,7 @@ mod tests {
         let companion_name = lonely.visible_agents[0].name.clone();
         assert!(matches!(
             engine.decide(&lonely).await.expect("decision"),
-            ProposedAction::Talk { target, message }
+            ProposedAction::Talk { target, message, .. }
                 if target == preferred && message.contains(&companion_name)
         ));
 
@@ -388,10 +495,27 @@ mod tests {
         personality.impulsiveness = 0.0;
         assert!(matches!(
             engine.decide(&purposeful).await.expect("decision"),
-            ProposedAction::Talk { message, .. }
-                if message == format!("It's good to see you, {companion_name}.")
+            ProposedAction::Talk {
+                tone: DialogueTone::Supportive,
+                message,
+                ..
+            } if message.contains(&companion_name)
+        ));
+        for visible in &mut purposeful.visible_agents {
+            visible.relationship = Relationship::NEUTRAL;
+        }
+        purposeful.self_description.personality.agreeableness = 0.6;
+        purposeful.self_description.personality.honesty = 0.4;
+        purposeful.self_description.mood = -1.0;
+        assert!(matches!(
+            engine.decide(&purposeful).await.expect("decision"),
+            ProposedAction::Talk {
+                tone: DialogueTone::Tense,
+                ..
+            }
         ));
 
+        purposeful.self_description.mood = 0.0;
         purposeful.self_description.personality.agreeableness = 0.0;
         purposeful.self_description.personality.ambition = 1.0;
         assert_eq!(

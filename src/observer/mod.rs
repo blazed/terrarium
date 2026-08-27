@@ -66,9 +66,10 @@ pub fn render_event(world: &World, event: &Event) -> String {
         EventKind::Spoke {
             speaker,
             listener,
+            tone,
             message,
         } => format!(
-            "{time}  {} spoke to {}\n       \"{}\"",
+            "{time}  {} spoke to {} [{tone}]\n       \"{}\"",
             agent_name(world, *speaker),
             agent_name(world, *listener),
             message
