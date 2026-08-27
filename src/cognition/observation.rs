@@ -1,6 +1,6 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget,
-    Occupation, OpeningHours, Personality, Relationship, Tick, World,
+    Activity, AgentId, Belief, Event, EventId, EventKind, GoalKind, LocationId, Needs,
+    ObservationTarget, Occupation, OpeningHours, Personality, Relationship, Tick, World,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -17,13 +17,32 @@ pub struct AgentObservation {
     pub route_hints: RouteHints,
     pub goals: Vec<GoalStatus>,
     pub relevant_memories: Vec<String>,
+    pub rumors: Vec<RumorSummary>,
     pub beliefs: BTreeMap<AgentId, Belief>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RumorSummary {
+    pub claim: EventId,
+    pub subject: Option<AgentId>,
+    pub report: String,
+    pub source: String,
+    pub depth: u8,
+    pub confidence: f32,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfrontationAffordance {
+    pub target: AgentId,
+    pub claim: EventId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionAffordances {
     pub move_to: Vec<LocationId>,
     pub talk_to: Vec<AgentId>,
+    pub confront: Vec<ConfrontationAffordance>,
     pub can_eat: bool,
     pub can_rest: bool,
     pub can_work: bool,
@@ -179,6 +198,21 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             .filter(|agent| agent.activity.is_none())
             .map(|agent| agent.id)
             .collect(),
+        confront: agent
+            .rumors
+            .iter()
+            .filter(|rumor| !rumor.resolved && rumor.confidence >= 0.4)
+            .filter_map(|rumor| {
+                let target = rumor_subject(&rumor.event.kind)?;
+                visible_agents
+                    .iter()
+                    .any(|agent| agent.id == target && agent.activity.is_none())
+                    .then_some(ConfrontationAffordance {
+                        target,
+                        claim: rumor.event.id,
+                    })
+            })
+            .collect(),
         can_eat: location.id == agent.home
             || location.serves_food && location.is_open(world.tick.hour()),
         can_rest: location.id == agent.home,
@@ -251,8 +285,29 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             .iter()
             .map(|memory| describe_memory(world, observer, memory))
             .collect(),
+        rumors: agent
+            .rumors
+            .iter()
+            .map(|rumor| RumorSummary {
+                claim: rumor.event.id,
+                subject: rumor_subject(&rumor.event.kind),
+                report: describe_memory(world, observer, &rumor.event),
+                source: world.agents[&rumor.source].name.clone(),
+                depth: rumor.depth,
+                confidence: rumor.confidence,
+                resolved: rumor.resolved,
+            })
+            .collect(),
         beliefs: agent.beliefs.clone(),
     })
+}
+
+fn rumor_subject(kind: &EventKind) -> Option<AgentId> {
+    match kind {
+        EventKind::Spoke { speaker, .. } => Some(*speaker),
+        EventKind::Worked { agent } => Some(*agent),
+        _ => None,
+    }
 }
 
 fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> Option<LocationId> {
@@ -339,6 +394,32 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             agent_name(*speaker),
             agent_name(*listener)
         ),
+        EventKind::Confronted {
+            accuser,
+            target,
+            claim,
+            outcome,
+        } => {
+            let accuser = if *accuser == observer {
+                "You".into()
+            } else {
+                agent_name(*accuser)
+            };
+            let target = if *target == observer {
+                "you".into()
+            } else {
+                agent_name(*target)
+            };
+            let claim = world
+                .events()
+                .iter()
+                .find(|event| event.id == *claim)
+                .map_or_else(
+                    || claim.to_string(),
+                    |event| describe_memory(world, observer, event),
+                );
+            format!("{accuser} confronted {target} about {claim} The claim was {outcome}.")
+        }
         EventKind::Observed {
             observer: actor,
             target,
@@ -383,8 +464,8 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 mod tests {
     use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
-        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, GoalKind,
-        ObservationTarget, OpeningHours, ProposedAction, Relationship, Tick, World,
+        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, GoalKind,
+        ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -697,6 +778,50 @@ mod tests {
             perceive(&world, hidden)
                 .expect("hidden")
                 .relevant_memories
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rumors_are_observer_specific_and_name_the_source() {
+        let mut world = World::briar_glen(12).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let observer = residents[0];
+        let source = residents[1];
+        let outsider = residents[2];
+        let mut event = match world.execute(source, ProposedAction::Wait) {
+            ActionResult::Success(events) => events[0].clone(),
+            ActionResult::Rejected(reason) => panic!("wait rejected: {reason:?}"),
+        };
+        event.kind = EventKind::Worked { agent: source };
+        world.agents.get_mut(&source).expect("source").activity = None;
+        let claim = event.id;
+        world.agents.get_mut(&observer).expect("observer").rumors = vec![Rumor {
+            event,
+            source,
+            depth: 2,
+            confidence: 0.6,
+            resolved: false,
+        }];
+
+        let observation = perceive(&world, observer).expect("observer");
+        let rumor = &observation.rumors[0];
+        assert!(rumor.report.contains(&world.agents[&source].name));
+        assert_eq!(rumor.source, world.agents[&source].name);
+        assert_eq!(rumor.subject, Some(source));
+        assert_eq!(rumor.depth, 2);
+        assert_eq!(rumor.confidence, 0.6);
+        assert_eq!(
+            observation.action_affordances.confront,
+            vec![super::ConfrontationAffordance {
+                target: source,
+                claim,
+            }]
+        );
+        assert!(
+            perceive(&world, outsider)
+                .expect("outsider")
+                .rumors
                 .is_empty()
         );
     }

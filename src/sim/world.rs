@@ -1,14 +1,28 @@
 use super::{
-    ActionRejection, ActionResult, Activity, Agent, AgentId, DialogueTone, Event, EventId,
-    EventKind, Goal, GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR,
-    Needs, ObservationTarget, Occupation, OpeningHours, Personality, ProposedAction, Relationship,
-    Tick, seeded_uuid,
+    ActionRejection, ActionResult, Activity, Agent, AgentId, ConfrontationOutcome, DialogueTone,
+    Event, EventId, EventKind, Goal, GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS,
+    NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation, OpeningHours, Personality,
+    ProposedAction, Relationship, Rumor, Tick, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const MEMORY_LIMIT: usize = 20;
+const RUMOR_LIMIT: usize = 20;
+
+fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
+    match kind {
+        EventKind::Spoke { speaker, tone, .. } => Some(match tone {
+            DialogueTone::Friendly => (*speaker, 0.08, 0.0, -0.03),
+            DialogueTone::Supportive => (*speaker, 0.06, 0.06, -0.03),
+            DialogueTone::Neutral => (*speaker, 0.04, 0.0, 0.0),
+            DialogueTone::Tense => (*speaker, 0.02, -0.03, 0.12),
+        }),
+        EventKind::Worked { agent } => Some((*agent, 0.0, 0.08, 0.0)),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WorldError {
@@ -169,6 +183,7 @@ impl World {
                     Goal::new("Maintain personal wellbeing", GoalKind::Wellbeing),
                 ],
                 memories: Vec::new(),
+                rumors: Vec::new(),
             };
             locations
                 .get_mut(&home)
@@ -325,6 +340,14 @@ impl World {
                     )));
                 }
             }
+            for rumor in &agent.rumors {
+                if history.get(&rumor.event.id).copied() != Some(&rumor.event) {
+                    return Err(WorldError::InvalidState(format!(
+                        "agent {} heard a rumor absent from history",
+                        agent.id
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -459,6 +482,49 @@ impl World {
                     message: message.into(),
                 }
             }
+            ProposedAction::Confront { target, claim } => {
+                if target == actor {
+                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
+                }
+                let Some(target_agent) = self.agents.get(&target) else {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::UnknownAgent(target),
+                    );
+                };
+                if target_agent.location != current {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::NotCoLocated { actor, target },
+                    );
+                }
+                let Some(rumor) = self.agents[&actor]
+                    .rumors
+                    .iter()
+                    .find(|rumor| rumor.event.id == claim && !rumor.resolved)
+                    .cloned()
+                else {
+                    return self.reject(actor, Some(current), ActionRejection::UnknownClaim(claim));
+                };
+                if self.events.iter().find(|event| event.id == claim) != Some(&rumor.event)
+                    || !matches!(event_evidence(&rumor.event.kind), Some((subject, ..)) if subject == target)
+                {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ClaimNotAboutTarget { claim, target },
+                    );
+                }
+                let outcome = self.resolve_confrontation(actor, target, &rumor);
+                EventKind::Confronted {
+                    accuser: actor,
+                    target,
+                    claim,
+                    outcome,
+                }
+            }
             ProposedAction::Observe { target } => {
                 match &target {
                     ObservationTarget::Agent(target_agent) => {
@@ -554,12 +620,20 @@ impl World {
         };
 
         self.apply_action_effects(actor, &kind);
+        if let EventKind::Spoke { listener, .. } = &kind {
+            self.share_rumor(actor, *listener);
+        }
         if let Some(activity) = Activity::from_event(&kind, self.tick) {
             self.agents.get_mut(&actor).expect("known actor").activity = Some(activity);
-            if let EventKind::Spoke { listener, .. } = &kind {
+            let other = match &kind {
+                EventKind::Spoke { listener, .. } => Some(*listener),
+                EventKind::Confronted { target, .. } => Some(*target),
+                _ => None,
+            };
+            if let Some(other) = other {
                 self.agents
-                    .get_mut(listener)
-                    .expect("validated listener")
+                    .get_mut(&other)
+                    .expect("validated resident")
                     .activity = Some(activity);
             }
         }
@@ -572,6 +646,173 @@ impl World {
             ));
         }
         ActionResult::Success(events)
+    }
+
+    fn share_rumor(&mut self, speaker: AgentId, listener: AgentId) {
+        let known = self
+            .agents
+            .get(&listener)
+            .map(|agent| {
+                agent
+                    .memories
+                    .iter()
+                    .map(|event| event.id)
+                    .chain(agent.rumors.iter().map(|rumor| rumor.event.id))
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let Some((event, depth, base_confidence)) = self.agents.get(&speaker).and_then(|agent| {
+            agent
+                .memories
+                .iter()
+                .rev()
+                .find(|event| !known.contains(&event.id))
+                .map(|event| (event.clone(), 1, 0.9))
+                .or_else(|| {
+                    agent
+                        .rumors
+                        .iter()
+                        .rev()
+                        .find(|rumor| !known.contains(&rumor.event.id))
+                        .and_then(|rumor| {
+                            rumor
+                                .depth
+                                .checked_add(1)
+                                .map(|depth| (rumor.event.clone(), depth, rumor.confidence * 0.7))
+                        })
+                })
+        }) else {
+            return;
+        };
+
+        let honesty = self.agents[&speaker].personality.honesty;
+        let relationship = self.agents[&listener]
+            .relationships
+            .get(&speaker)
+            .copied()
+            .unwrap_or(Relationship::NEUTRAL);
+        let perceived_trust =
+            ((relationship.trust - relationship.suspicion + 2.0) / 4.0).clamp(0.0, 1.0);
+        let confidence = base_confidence * (0.5 + 0.5 * honesty) * (0.5 + 0.5 * perceived_trust);
+        if confidence < 0.15 {
+            return;
+        }
+
+        let agent = self.agents.get_mut(&listener).expect("known listener");
+        if let Some((subject, sociability, reliability, hostility)) = event_evidence(&event.kind)
+            && subject != listener
+        {
+            agent.learn_about_weighted(subject, sociability, reliability, hostility, confidence);
+        }
+        agent.rumors.push(Rumor {
+            event,
+            source: speaker,
+            depth,
+            confidence,
+            resolved: false,
+        });
+        let excess = agent.rumors.len().saturating_sub(RUMOR_LIMIT);
+        agent.rumors.drain(..excess);
+    }
+
+    fn resolve_confrontation(
+        &mut self,
+        accuser: AgentId,
+        target: AgentId,
+        rumor: &Rumor,
+    ) -> ConfrontationOutcome {
+        let response = &self.agents[&target];
+        let toward_accuser = response
+            .relationships
+            .get(&accuser)
+            .copied()
+            .unwrap_or(Relationship::NEUTRAL);
+        let source_credibility = self.agents[&accuser]
+            .relationships
+            .get(&rumor.source)
+            .map_or(0.5, |relationship| {
+                ((relationship.trust - relationship.suspicion + 2.0) / 4.0).clamp(0.0, 1.0)
+            });
+        let candor = response.personality.honesty
+            + 0.15 * (toward_accuser.trust - toward_accuser.suspicion)
+            + 0.1 * source_credibility
+            + 0.1 * response.mood;
+        let outcome = if candor >= 0.65 {
+            ConfrontationOutcome::Confirmed
+        } else if candor <= 0.4 {
+            ConfrontationOutcome::Denied
+        } else {
+            ConfrontationOutcome::Challenged
+        };
+
+        let accuser_state = self.agents.get_mut(&accuser).expect("known accuser");
+        if let Some(known) = accuser_state
+            .rumors
+            .iter_mut()
+            .find(|known| known.event.id == rumor.event.id)
+        {
+            known.confidence = match outcome {
+                ConfrontationOutcome::Confirmed => known.confidence.max(0.9),
+                ConfrontationOutcome::Denied => known.confidence * 0.5,
+                ConfrontationOutcome::Challenged => known.confidence * 0.75,
+            };
+            known.resolved = true;
+        }
+        if let Some((subject, sociability, reliability, hostility)) =
+            event_evidence(&rumor.event.kind)
+        {
+            match outcome {
+                ConfrontationOutcome::Confirmed => accuser_state.learn_about_weighted(
+                    subject,
+                    sociability,
+                    reliability,
+                    hostility,
+                    1.0,
+                ),
+                ConfrontationOutcome::Denied | ConfrontationOutcome::Challenged => {
+                    if let Some(belief) = accuser_state.beliefs.get_mut(&subject) {
+                        belief.confidence *= if outcome == ConfrontationOutcome::Denied {
+                            0.7
+                        } else {
+                            0.85
+                        };
+                    }
+                }
+            }
+        }
+
+        let weak_accusation = rumor.confidence < 0.5;
+        let adjust = |relationship: &mut Relationship, trust: f32, suspicion: f32| {
+            relationship.trust = (relationship.trust + trust).clamp(-1.0, 1.0);
+            relationship.suspicion = (relationship.suspicion + suspicion).clamp(-1.0, 1.0);
+        };
+        let accuser_relationship = self
+            .agents
+            .get_mut(&accuser)
+            .expect("known accuser")
+            .relationships
+            .entry(target)
+            .or_insert(Relationship::NEUTRAL);
+        match outcome {
+            ConfrontationOutcome::Confirmed => adjust(accuser_relationship, 0.04, -0.03),
+            ConfrontationOutcome::Denied => adjust(accuser_relationship, -0.05, 0.06),
+            ConfrontationOutcome::Challenged => adjust(accuser_relationship, -0.01, 0.03),
+        }
+        let target_relationship = self
+            .agents
+            .get_mut(&target)
+            .expect("known target")
+            .relationships
+            .entry(accuser)
+            .or_insert(Relationship::NEUTRAL);
+        let (trust, suspicion) = match outcome {
+            ConfrontationOutcome::Confirmed if !weak_accusation => (0.01, 0.0),
+            ConfrontationOutcome::Confirmed => (-0.02, 0.03),
+            ConfrontationOutcome::Denied => (-0.05, 0.08),
+            ConfrontationOutcome::Challenged => (-0.03, 0.05),
+        };
+        adjust(target_relationship, trust, suspicion);
+        outcome
     }
 
     fn advance_goal(&mut self, actor: AgentId, event: &EventKind) -> Option<String> {
@@ -635,7 +876,8 @@ impl World {
                     agent.needs.food = (agent.needs.food - 0.02).max(0.0);
                 }
             }
-            EventKind::GoalCompleted { .. }
+            EventKind::Confronted { .. }
+            | EventKind::GoalCompleted { .. }
             | EventKind::Waited { .. }
             | EventKind::ActionRejected { .. } => {}
         }
@@ -725,6 +967,20 @@ impl World {
             EventKind::Ate { agent } => adjust(*agent, 0.06),
             EventKind::Rested { agent } => adjust(*agent, 0.08),
             EventKind::Worked { agent } => adjust(*agent, 0.03),
+            EventKind::Confronted {
+                accuser,
+                target,
+                outcome,
+                ..
+            } => {
+                let (accuser_change, target_change) = match outcome {
+                    ConfrontationOutcome::Confirmed => (0.04, 0.01),
+                    ConfrontationOutcome::Denied => (-0.06, -0.05),
+                    ConfrontationOutcome::Challenged => (-0.03, -0.04),
+                };
+                adjust(*accuser, accuser_change);
+                adjust(*target, target_change);
+            }
             EventKind::Observed { observer, .. } => adjust(*observer, 0.02),
             EventKind::GoalCompleted { agent, .. } => adjust(*agent, 0.15),
             EventKind::ActionRejected { agent, .. } => adjust(*agent, -0.06),
@@ -746,6 +1002,11 @@ impl World {
             } => {
                 witnesses.extend([*speaker, *listener]);
             }
+            EventKind::Confronted {
+                accuser, target, ..
+            } => {
+                witnesses.extend([*accuser, *target]);
+            }
             EventKind::Observed { observer, target } => {
                 witnesses.insert(*observer);
                 if let ObservationTarget::Agent(agent) = target {
@@ -764,16 +1025,7 @@ impl World {
             witnesses.extend(location.agents.iter().copied());
         }
 
-        let evidence = match &event.kind {
-            EventKind::Spoke { speaker, tone, .. } => Some(match tone {
-                DialogueTone::Friendly => (*speaker, 0.08, 0.0, -0.03),
-                DialogueTone::Supportive => (*speaker, 0.06, 0.06, -0.03),
-                DialogueTone::Neutral => (*speaker, 0.04, 0.0, 0.0),
-                DialogueTone::Tense => (*speaker, 0.02, -0.03, 0.12),
-            }),
-            EventKind::Worked { agent } => Some((*agent, 0.0, 0.08, 0.0)),
-            _ => None,
-        };
+        let evidence = event_evidence(&event.kind);
         for witness in witnesses {
             if let Some(agent) = self.agents.get_mut(&witness) {
                 agent.memories.push(event.clone());
@@ -879,6 +1131,30 @@ impl World {
                     "agent {id} has too many memories"
                 )));
             }
+            let memory_ids = agent
+                .memories
+                .iter()
+                .map(|event| event.id)
+                .collect::<BTreeSet<_>>();
+            let rumor_ids = agent
+                .rumors
+                .iter()
+                .map(|rumor| rumor.event.id)
+                .collect::<BTreeSet<_>>();
+            if agent.rumors.len() > RUMOR_LIMIT
+                || rumor_ids.len() != agent.rumors.len()
+                || !memory_ids.is_disjoint(&rumor_ids)
+                || agent.rumors.iter().any(|rumor| {
+                    rumor.source == *id
+                        || !self.agents.contains_key(&rumor.source)
+                        || rumor.depth == 0
+                        || !(0.0..=1.0).contains(&rumor.confidence)
+                })
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has invalid rumors"
+                )));
+            }
         }
         Ok(())
     }
@@ -887,9 +1163,9 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, Activity, AgentId, DialogueTone, EventKind,
-        MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction, Relationship, Tick, World,
-        WorldError,
+        ActionRejection, ActionResult, Activity, AgentId, ConfrontationOutcome, DialogueTone,
+        EventId, EventKind, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
+        Relationship, Tick, World, WorldError,
     };
     use crate::sim::ActivityKind;
     use uuid::Uuid;
@@ -1298,6 +1574,179 @@ mod tests {
             .expect("belief")
             .confidence = 1.1;
         assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+    }
+
+    #[test]
+    fn conversations_propagate_bounded_degrading_rumors() {
+        let mut world = World::briar_glen(42).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let subject = residents[0];
+        let first_listener = residents[2];
+        let second_listener = residents[3];
+        let fact = world.append_event(None, EventKind::Worked { agent: subject });
+
+        world.execute(
+            subject,
+            ProposedAction::Talk {
+                target: first_listener,
+                tone: DialogueTone::Neutral,
+                message: "Work went well today.".into(),
+            },
+        );
+        let rumor = &world.agents[&first_listener].rumors[0];
+        assert_eq!(rumor.event, fact);
+        assert_eq!(rumor.source, subject);
+        assert_eq!(rumor.depth, 1);
+        assert!(rumor.confidence > 0.0 && rumor.confidence <= 1.0);
+        assert!(world.agents[&first_listener].beliefs[&subject].reliability > 0.5);
+
+        let first_confidence = rumor.confidence;
+        world.execute(
+            subject,
+            ProposedAction::Talk {
+                target: first_listener,
+                tone: DialogueTone::Neutral,
+                message: "As I was saying.".into(),
+            },
+        );
+        assert_eq!(world.agents[&first_listener].rumors.len(), 1);
+
+        world.execute(
+            first_listener,
+            ProposedAction::Talk {
+                target: second_listener,
+                tone: DialogueTone::Neutral,
+                message: "I heard work went well.".into(),
+            },
+        );
+        let retelling = world.agents[&second_listener]
+            .rumors
+            .iter()
+            .find(|rumor| rumor.event.id == fact.id)
+            .expect("retold rumor");
+        assert_eq!(retelling.source, first_listener);
+        assert_eq!(retelling.depth, 2);
+        assert!(retelling.confidence < first_confidence);
+        let retelling_confidence = retelling.confidence;
+        world.validate().expect("valid rumors");
+
+        world
+            .agents
+            .get_mut(&second_listener)
+            .expect("listener")
+            .rumors[0]
+            .confidence = 1.1;
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+        world
+            .agents
+            .get_mut(&second_listener)
+            .expect("listener")
+            .rumors[0]
+            .confidence = retelling_confidence;
+        world
+            .agents
+            .get_mut(&second_listener)
+            .expect("listener")
+            .rumors[0]
+            .event
+            .id = crate::sim::EventId(Uuid::nil());
+        assert!(matches!(
+            world.validate_history(),
+            Err(WorldError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn confrontations_confirm_deny_and_reject_invalid_claims() {
+        fn world_with_rumor(honesty: f32) -> (World, AgentId, AgentId, EventId) {
+            let mut world = World::briar_glen(43).expect("town");
+            let residents = world.agents.keys().copied().collect::<Vec<_>>();
+            let target = residents[0];
+            let accuser = residents[2];
+            world
+                .agents
+                .get_mut(&target)
+                .expect("target")
+                .personality
+                .honesty = honesty;
+            let fact = world.append_event(None, EventKind::Worked { agent: target });
+            world.execute(
+                target,
+                ProposedAction::Talk {
+                    target: accuser,
+                    tone: DialogueTone::Neutral,
+                    message: "Work went well.".into(),
+                },
+            );
+            (world, accuser, target, fact.id)
+        }
+
+        let (mut world, accuser, target, claim) = world_with_rumor(1.0);
+        let old_confidence = world.agents[&accuser].rumors[0].confidence;
+        let result = world.execute(accuser, ProposedAction::Confront { target, claim });
+        assert!(matches!(
+            result,
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Confronted {
+                    outcome: ConfrontationOutcome::Confirmed,
+                    ..
+                })
+        ));
+        assert!(world.agents[&accuser].rumors[0].confidence > old_confidence);
+
+        let (mut world, accuser, target, claim) = world_with_rumor(0.0);
+        let old_trust = world.agents[&target]
+            .relationships
+            .get(&accuser)
+            .expect("conversation relationship")
+            .trust;
+        assert!(matches!(
+            world.execute(accuser, ProposedAction::Confront { target, claim }),
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Confronted {
+                    outcome: ConfrontationOutcome::Denied,
+                    ..
+                })
+        ));
+        assert!(world.agents[&target].relationships[&accuser].trust < old_trust);
+        assert!(matches!(
+            world.execute(
+                accuser,
+                ProposedAction::Confront {
+                    target,
+                    claim: EventId(Uuid::nil()),
+                },
+            ),
+            ActionResult::Rejected(ActionRejection::UnknownClaim(_))
+        ));
+
+        world.agents.get_mut(&accuser).expect("accuser").rumors[0].resolved = false;
+        let wrong_target = world
+            .agents
+            .keys()
+            .copied()
+            .find(|id| *id != accuser && *id != target)
+            .expect("third resident");
+        assert!(matches!(
+            world.execute(
+                accuser,
+                ProposedAction::Confront {
+                    target: wrong_target,
+                    claim,
+                },
+            ),
+            ActionResult::Rejected(ActionRejection::ClaimNotAboutTarget { .. })
+        ));
+
+        let (mut world, accuser, target, claim) = world_with_rumor(0.5);
+        assert!(matches!(
+            world.execute(accuser, ProposedAction::Confront { target, claim }),
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Confronted {
+                    outcome: ConfrontationOutcome::Challenged,
+                    ..
+                })
+        ));
     }
 
     #[test]

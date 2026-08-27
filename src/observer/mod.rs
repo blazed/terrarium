@@ -35,6 +35,7 @@ pub fn render_summary(world: &World) -> String {
     };
     let moves = count(|kind| matches!(kind, EventKind::Moved { .. }));
     let conversations = count(|kind| matches!(kind, EventKind::Spoke { .. }));
+    let confrontations = count(|kind| matches!(kind, EventKind::Confronted { .. }));
     let meals = count(|kind| matches!(kind, EventKind::Ate { .. }));
     let rests = count(|kind| matches!(kind, EventKind::Rested { .. }));
     let work = count(|kind| matches!(kind, EventKind::Worked { .. }));
@@ -46,6 +47,7 @@ pub fn render_summary(world: &World) -> String {
         format!("Events: {}", world.events().len()),
         format!("Moves: {moves}"),
         format!("Conversations: {conversations}"),
+        format!("Confrontations: {confrontations}"),
         format!("Meals: {meals}"),
         format!("Rests: {rests}"),
         format!("Work: {work}"),
@@ -73,6 +75,16 @@ pub fn render_event(world: &World, event: &Event) -> String {
             agent_name(world, *speaker),
             agent_name(world, *listener),
             message
+        ),
+        EventKind::Confronted {
+            accuser,
+            target,
+            outcome,
+            ..
+        } => format!(
+            "{time}  {} confronted {}: {outcome}",
+            agent_name(world, *accuser),
+            agent_name(world, *target)
         ),
         EventKind::Observed { observer, target } => format!(
             "{time}  {} observed {}",

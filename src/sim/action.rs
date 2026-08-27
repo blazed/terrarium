@@ -42,6 +42,10 @@ pub enum ProposedAction {
         tone: DialogueTone,
         message: String,
     },
+    Confront {
+        target: AgentId,
+        claim: super::EventId,
+    },
     Observe {
         target: ObservationTarget,
     },
@@ -83,6 +87,13 @@ pub enum ActionRejection {
     CannotWorkHere(LocationId),
     #[error("agent cannot work at hour {0:02}:00")]
     OutsideWorkingHours(u64),
+    #[error("actor does not know rumor claim {0}")]
+    UnknownClaim(super::EventId),
+    #[error("rumor claim {claim} is not about target {target}")]
+    ClaimNotAboutTarget {
+        claim: super::EventId,
+        target: AgentId,
+    },
     #[error("message cannot be empty")]
     EmptyMessage,
     #[error("message must be a single printable line")]

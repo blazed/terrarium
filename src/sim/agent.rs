@@ -170,6 +170,16 @@ impl Belief {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rumor {
+    pub event: Event,
+    pub source: AgentId,
+    pub depth: u8,
+    pub confidence: f32,
+    #[serde(default)]
+    pub resolved: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityKind {
@@ -192,7 +202,7 @@ impl Activity {
     pub(super) fn from_event(event: &EventKind, now: Tick) -> Option<Self> {
         let (kind, duration) = match event {
             EventKind::Moved { .. } => (ActivityKind::Travelling, 2),
-            EventKind::Spoke { .. } => (ActivityKind::Conversing, 3),
+            EventKind::Spoke { .. } | EventKind::Confronted { .. } => (ActivityKind::Conversing, 3),
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
             EventKind::Ate { .. } => (ActivityKind::Eating, 3),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
@@ -228,6 +238,8 @@ pub struct Agent {
     pub goals: Vec<Goal>,
     #[serde(default)]
     pub memories: Vec<Event>,
+    #[serde(default)]
+    pub rumors: Vec<Rumor>,
 }
 
 impl Agent {
@@ -251,11 +263,22 @@ impl Agent {
         reliability: f32,
         hostility: f32,
     ) {
+        self.learn_about_weighted(subject, sociability, reliability, hostility, 1.0);
+    }
+
+    pub(super) fn learn_about_weighted(
+        &mut self,
+        subject: AgentId,
+        sociability: f32,
+        reliability: f32,
+        hostility: f32,
+        weight: f32,
+    ) {
         let belief = self.beliefs.entry(subject).or_default();
-        belief.sociability = (belief.sociability + sociability).clamp(0.0, 1.0);
-        belief.reliability = (belief.reliability + reliability).clamp(0.0, 1.0);
-        belief.hostility = (belief.hostility + hostility).clamp(0.0, 1.0);
-        belief.confidence = (belief.confidence + 0.15).min(1.0);
+        belief.sociability = (belief.sociability + sociability * weight).clamp(0.0, 1.0);
+        belief.reliability = (belief.reliability + reliability * weight).clamp(0.0, 1.0);
+        belief.hostility = (belief.hostility + hostility * weight).clamp(0.0, 1.0);
+        belief.confidence = (belief.confidence + 0.15 * weight).min(1.0);
     }
 
     pub(super) fn decay_beliefs(&mut self, ticks: u64) {
@@ -288,9 +311,11 @@ mod tests {
         object.remove("activity");
         object.remove("mood");
         object.remove("beliefs");
+        object.remove("rumors");
         let agent: Agent = serde_json::from_value(value).expect("legacy agent");
         assert_eq!(agent.activity, None);
         assert_eq!(agent.mood, 0.0);
         assert!(agent.beliefs.is_empty());
+        assert!(agent.rumors.is_empty());
     }
 }

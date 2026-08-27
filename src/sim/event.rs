@@ -9,6 +9,24 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfrontationOutcome {
+    Confirmed,
+    Denied,
+    Challenged,
+}
+
+impl std::fmt::Display for ConfrontationOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Confirmed => "confirmed",
+            Self::Denied => "denied",
+            Self::Challenged => "challenged",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
@@ -23,6 +41,12 @@ pub enum EventKind {
         #[serde(default)]
         tone: DialogueTone,
         message: String,
+    },
+    Confronted {
+        accuser: AgentId,
+        target: AgentId,
+        claim: EventId,
+        outcome: ConfrontationOutcome,
     },
     Observed {
         observer: AgentId,

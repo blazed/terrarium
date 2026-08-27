@@ -11,12 +11,13 @@ const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
-Beliefs are subjective estimates from witnessed behavior; weigh sociability, reliability, and hostility by confidence, never as objective facts.
-The observation gives local_time, work_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
-For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation and relevant memories. Keep it to one printable line of at most 200 characters.
+Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
+The observation gives local_time, work_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
+For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
 {"action":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}
+{"action":"confront","target":"agent UUID","claim":"event UUID"}
 {"action":"observe","target":{"target":"agent","id":"agent UUID"}}
 {"action":"observe","target":{"target":"location","id":"location UUID"}}
 {"action":"eat"}
@@ -281,6 +282,10 @@ fn action_is_afforded(observation: &AgentObservation, action: &ProposedAction) -
     match action {
         ProposedAction::Move { destination } => affordances.move_to.contains(destination),
         ProposedAction::Talk { target, .. } => affordances.talk_to.contains(target),
+        ProposedAction::Confront { target, claim } => affordances
+            .confront
+            .iter()
+            .any(|affordance| affordance.target == *target && affordance.claim == *claim),
         ProposedAction::Observe {
             target: ObservationTarget::Agent(target),
         } => affordances.talk_to.contains(target),
@@ -388,9 +393,9 @@ mod tests {
         action_is_afforded,
     };
     use crate::{
-        cognition::perceive,
+        cognition::{ConfrontationAffordance, perceive},
         decision::{DecisionEngine, DecisionError},
-        sim::{ActionResult, ProposedAction, World},
+        sim::{ActionResult, EventId, ProposedAction, World},
     };
     use std::{
         io::{Read, Write},
@@ -398,14 +403,27 @@ mod tests {
         thread,
         time::Duration,
     };
+    use uuid::Uuid;
 
     #[test]
     fn unavailable_actions_are_rejected_before_execution() {
         let world = World::briar_glen(42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
-        let observation = perceive(&world, actor).expect("observation");
+        let mut observation = perceive(&world, actor).expect("observation");
+        let confrontation = ConfrontationAffordance {
+            target: observation.visible_agents[0].id,
+            claim: EventId(Uuid::nil()),
+        };
+        observation.action_affordances.confront.push(confrontation);
 
         assert!(action_is_afforded(&observation, &ProposedAction::Wait));
+        assert!(action_is_afforded(
+            &observation,
+            &ProposedAction::Confront {
+                target: confrontation.target,
+                claim: confrontation.claim,
+            }
+        ));
         assert_eq!(
             action_is_afforded(&observation, &ProposedAction::Work),
             observation.action_affordances.can_work
@@ -433,6 +451,11 @@ mod tests {
             assert!(request.contains("friendly|supportive|neutral|tense"));
             assert!(request.contains("Mood ranges from -1"));
             assert!(request.contains("Beliefs are subjective estimates"));
+            assert!(request.contains("treat them as hearsay"));
+            assert!(request.contains("Confront only an exact target and claim pair"));
+            assert!(request.contains(r#"{\"action\":\"confront\""#));
+            assert!(request.contains(r#"\"rumors\":"#));
+            assert!(request.contains(r#"\"confront\":"#));
             assert!(request.contains("Route hints are immediate legal move_to IDs"));
             assert!(request.contains("Move only to a move_to ID"));
             assert!(request.contains("when its can_* value is true"));

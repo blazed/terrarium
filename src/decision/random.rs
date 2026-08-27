@@ -90,6 +90,28 @@ impl DecisionEngine for RandomDecisionEngine {
             });
         }
 
+        if let Some(confrontation) =
+            observation
+                .action_affordances
+                .confront
+                .iter()
+                .max_by(|left, right| {
+                    let confidence = |claim| {
+                        observation
+                            .rumors
+                            .iter()
+                            .find(|rumor| rumor.claim == claim)
+                            .map_or(0.0, |rumor| rumor.confidence)
+                    };
+                    confidence(left.claim).total_cmp(&confidence(right.claim))
+                })
+        {
+            return Ok(ProposedAction::Confront {
+                target: confrontation.target,
+                claim: confrontation.claim,
+            });
+        }
+
         let hour = observation.tick.hour();
         if !(7..21).contains(&hour) {
             return Ok(
@@ -310,12 +332,13 @@ fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> Di
 mod tests {
     use super::{DecisionEngine, RandomDecisionEngine};
     use crate::{
-        cognition::perceive,
+        cognition::{ConfrontationAffordance, RumorSummary, perceive},
         sim::{
-            Belief, DialogueTone, GoalKind, ObservationTarget, ProposedAction, Relationship, Tick,
-            World,
+            Belief, DialogueTone, EventId, GoalKind, ObservationTarget, ProposedAction,
+            Relationship, Tick, World,
         },
     };
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn confident_beliefs_shape_companion_and_tone() {
@@ -364,6 +387,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn credible_rumors_trigger_confrontations() {
+        let world = World::briar_glen(18).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.needs.food = 0.5;
+        observation.self_description.needs.energy = 0.5;
+        observation.self_description.needs.companionship = 0.5;
+        observation.self_description.needs.safety = 0.5;
+        let target = observation.visible_agents[0].id;
+        let claim = EventId(Uuid::nil());
+        observation.action_affordances.confront = vec![ConfrontationAffordance { target, claim }];
+        observation.rumors = vec![RumorSummary {
+            claim,
+            subject: Some(target),
+            report: "A known report".into(),
+            source: "A resident".into(),
+            depth: 1,
+            confidence: 0.8,
+            resolved: false,
+        }];
+
+        assert_eq!(
+            RandomDecisionEngine::new(18)
+                .decide(&observation)
+                .await
+                .expect("decision"),
+            ProposedAction::Confront { target, claim }
+        );
     }
 
     #[tokio::test]

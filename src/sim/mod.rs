@@ -11,9 +11,9 @@ pub use action::{
     ProposedAction,
 };
 pub use agent::{
-    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality,
+    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality, Rumor,
 };
-pub use event::{Event, EventKind};
+pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Location, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
