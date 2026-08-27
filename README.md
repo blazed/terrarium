@@ -8,9 +8,11 @@ A deterministic social-simulation core for the town of Briar Glen. Eight residen
 cargo run -- run
 cargo run -- run --seed 814921 --days 7
 cargo run -- run --seed 814921 --ticks 10000
+cargo run -- run --seed 814921 --days 7 --database briar-glen.sqlite
+cargo run -- inspect briar-glen.sqlite
 ```
 
-Set `RUST_LOG=debug` to see tracing output separately from simulation output.
+`--database` atomically stores the completed world's metadata, agents, locations, and ordered events in SQLite. `inspect` reads that database in a later process. Set `RUST_LOG=debug` to see tracing output separately from simulation output.
 
 ## Validate
 
@@ -24,4 +26,4 @@ cargo test
 
 The pipeline is `World → perceive → AgentObservation → DecisionEngine → ProposedAction → World::execute → Event`. IDs, simulation time, actions, rejections, and events are typed. Seed-derived IDs and a seeded random engine make runs reproducible.
 
-SQLite persistence and LLM integration are intentionally deferred until this deterministic core is stable.
+Persistence is a completed-run snapshot rather than resumable simulation state. LLM integration remains intentionally deferred.
