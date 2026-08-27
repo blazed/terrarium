@@ -1,7 +1,7 @@
 use super::{
-    ActionRejection, ActionResult, Agent, AgentId, Event, EventId, EventKind, Goal, Location,
-    LocationId, Needs, ObservationTarget, Occupation, Personality, ProposedAction, Relationship,
-    Tick, seeded_uuid,
+    ActionRejection, ActionResult, Agent, AgentId, Event, EventId, EventKind, Goal, GoalKind,
+    Location, LocationId, Needs, ObservationTarget, Occupation, Personality, ProposedAction,
+    Relationship, Tick, seeded_uuid,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -134,7 +134,12 @@ impl World {
                     energy: 0.8,
                 },
                 relationships: BTreeMap::new(),
-                goals: vec![Goal(format!("Succeed as {name}"))],
+                goals: vec![
+                    Goal::new(format!("Succeed as {name}"), GoalKind::Livelihood),
+                    Goal::new("Strengthen community ties", GoalKind::Community),
+                    Goal::new("Know Briar Glen", GoalKind::Exploration),
+                    Goal::new("Maintain personal wellbeing", GoalKind::Wellbeing),
+                ],
                 memories: Vec::new(),
             };
             locations
@@ -479,8 +484,33 @@ impl World {
         };
 
         self.apply_action_effects(actor, &kind);
-        let event = self.append_event(Some(current), kind);
-        ActionResult::Success(vec![event])
+        let completed_goal = self.advance_goal(actor, &kind);
+        let mut events = vec![self.append_event(Some(current), kind)];
+        if let Some(goal) = completed_goal {
+            events.push(self.append_event(
+                Some(current),
+                EventKind::GoalCompleted { agent: actor, goal },
+            ));
+        }
+        ActionResult::Success(events)
+    }
+
+    fn advance_goal(&mut self, actor: AgentId, event: &EventKind) -> Option<String> {
+        let kind = match event {
+            EventKind::Worked { .. } => GoalKind::Livelihood,
+            EventKind::Spoke { .. } => GoalKind::Community,
+            EventKind::Observed { .. } => GoalKind::Exploration,
+            EventKind::Ate { .. } | EventKind::Rested { .. } => GoalKind::Wellbeing,
+            _ => return None,
+        };
+        let goal = self
+            .agents
+            .get_mut(&actor)?
+            .goals
+            .iter_mut()
+            .find(|goal| goal.kind == kind && goal.progress < 1.0)?;
+        goal.progress = (goal.progress + 0.25).min(1.0);
+        (goal.progress == 1.0).then(|| goal.description.clone())
     }
 
     fn apply_action_effects(&mut self, actor: AgentId, kind: &EventKind) {
@@ -526,7 +556,9 @@ impl World {
                     agent.needs.food = (agent.needs.food - 0.02).max(0.0);
                 }
             }
-            EventKind::Waited { .. } | EventKind::ActionRejected { .. } => {}
+            EventKind::GoalCompleted { .. }
+            | EventKind::Waited { .. }
+            | EventKind::ActionRejected { .. } => {}
         }
     }
 
@@ -593,7 +625,8 @@ impl World {
             }
             EventKind::Ate { agent }
             | EventKind::Rested { agent }
-            | EventKind::Worked { agent } => {
+            | EventKind::Worked { agent }
+            | EventKind::GoalCompleted { agent, .. } => {
                 witnesses.insert(*agent);
             }
             EventKind::Waited { .. } | EventKind::ActionRejected { .. } => return,
@@ -662,6 +695,13 @@ impl World {
             }) {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has an invalid relationship"
+                )));
+            }
+            if agent.goals.iter().any(|goal| {
+                goal.description.trim().is_empty() || !(0.0..=1.0).contains(&goal.progress)
+            }) {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has an invalid goal"
                 )));
             }
             if agent.memories.len() > MEMORY_LIMIT {
@@ -750,6 +790,60 @@ mod tests {
                 .any(|event| matches!(event.kind, EventKind::Ate { agent } if agent == actor))
         );
         world.validate().expect("normalized needs");
+    }
+
+    #[test]
+    fn successful_actions_complete_goals_once() {
+        let mut world = World::briar_glen(4).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let actor = residents[0];
+        let listener = residents[1];
+
+        for _ in 0..4 {
+            world.execute(
+                actor,
+                ProposedAction::Talk {
+                    target: listener,
+                    message: "Hello.".into(),
+                },
+            );
+        }
+        let goal = world.agents[&actor]
+            .goals
+            .iter()
+            .find(|goal| goal.kind == super::GoalKind::Community)
+            .expect("community goal");
+        assert_eq!(goal.progress, 1.0);
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor))
+                .count(),
+            1
+        );
+        assert!(world.agents[&listener].memories.iter().any(
+            |event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor)
+        ));
+
+        world.execute(
+            actor,
+            ProposedAction::Talk {
+                target: listener,
+                message: "Again.".into(),
+            },
+        );
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor))
+                .count(),
+            1
+        );
+
+        world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1.1;
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 
     #[test]
@@ -961,7 +1055,10 @@ mod tests {
         }
 
         assert_eq!(world.agents[&actor].memories.len(), 20);
-        assert_eq!(world.agents[&actor].memories[0], world.events()[1]);
+        assert_eq!(
+            world.agents[&actor].memories,
+            world.events()[world.events().len() - 20..]
+        );
     }
 
     #[test]

@@ -79,7 +79,7 @@ mod tests {
             .expect("simulation");
 
         assert_eq!(left, right);
-        assert_eq!(emitted, 2_000);
+        assert_eq!(emitted, left.events().len());
         assert!(
             left.events()
                 .iter()

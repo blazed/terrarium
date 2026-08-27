@@ -38,6 +38,7 @@ pub fn render_summary(world: &World) -> String {
     let meals = count(|kind| matches!(kind, EventKind::Ate { .. }));
     let rests = count(|kind| matches!(kind, EventKind::Rested { .. }));
     let work = count(|kind| matches!(kind, EventKind::Worked { .. }));
+    let goals = count(|kind| matches!(kind, EventKind::GoalCompleted { .. }));
     let rejected = count(|kind| matches!(kind, EventKind::ActionRejected { .. }));
     [
         "=== RUN SUMMARY ===".into(),
@@ -48,6 +49,7 @@ pub fn render_summary(world: &World) -> String {
         format!("Meals: {meals}"),
         format!("Rests: {rests}"),
         format!("Work: {work}"),
+        format!("Goals completed: {goals}"),
         format!("Rejected actions: {rejected}"),
     ]
     .join("\n")
@@ -79,6 +81,10 @@ pub fn render_event(world: &World, event: &Event) -> String {
         EventKind::Ate { agent } => format!("{time}  {} ate", agent_name(world, *agent)),
         EventKind::Rested { agent } => format!("{time}  {} rested", agent_name(world, *agent)),
         EventKind::Worked { agent } => format!("{time}  {} worked", agent_name(world, *agent)),
+        EventKind::GoalCompleted { agent, goal } => format!(
+            "{time}  {} completed goal: {goal}",
+            agent_name(world, *agent)
+        ),
         EventKind::Waited { agent } => format!("{time}  {} waited", agent_name(world, *agent)),
         EventKind::ActionRejected { agent, reason } => format!(
             "{time}  {}'s action was rejected: {reason}",

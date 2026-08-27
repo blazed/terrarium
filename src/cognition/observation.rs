@@ -1,6 +1,6 @@
 use crate::sim::{
-    AgentId, Event, EventKind, LocationId, Needs, ObservationTarget, Occupation, Personality,
-    Relationship, Tick, World,
+    AgentId, Event, EventKind, GoalKind, LocationId, Needs, ObservationTarget, Occupation,
+    Personality, Relationship, Tick, World,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,9 +11,16 @@ pub struct AgentObservation {
     pub self_description: SelfDescription,
     pub current_location: LocationDescription,
     pub visible_agents: Vec<VisibleAgent>,
-    pub goals: Vec<String>,
+    pub goals: Vec<GoalStatus>,
     pub relevant_memories: Vec<String>,
     pub beliefs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoalStatus {
+    pub description: String,
+    pub kind: GoalKind,
+    pub progress: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,7 +147,15 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             connected,
         },
         visible_agents,
-        goals: agent.goals.iter().map(|goal| goal.0.clone()).collect(),
+        goals: agent
+            .goals
+            .iter()
+            .map(|goal| GoalStatus {
+                description: goal.description.clone(),
+                kind: goal.kind,
+                progress: goal.progress,
+            })
+            .collect(),
         relevant_memories: agent
             .memories
             .iter()
@@ -220,6 +235,12 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
         EventKind::Rested { agent } => format!("{} rested.", agent_name(*agent)),
         EventKind::Worked { agent } if *agent == observer => "You worked.".into(),
         EventKind::Worked { agent } => format!("{} worked.", agent_name(*agent)),
+        EventKind::GoalCompleted { agent, goal } if *agent == observer => {
+            format!("You completed your goal: {goal}.")
+        }
+        EventKind::GoalCompleted { agent, goal } => {
+            format!("{} completed their goal: {goal}.", agent_name(*agent))
+        }
         EventKind::Waited { agent } if *agent == observer => "You waited.".into(),
         EventKind::Waited { agent } => format!("{} waited.", agent_name(*agent)),
         EventKind::ActionRejected { agent, .. } if *agent == observer => {
@@ -235,7 +256,9 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ObservationError, perceive};
-    use crate::sim::{ActionResult, AgentId, ProposedAction, Relationship, World};
+    use crate::sim::{
+        ActionResult, AgentId, GoalKind, ObservationTarget, ProposedAction, Relationship, World,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -258,7 +281,24 @@ mod tests {
             .find(|id| **id != hidden)
             .expect("other resident");
 
+        let current = world.agents[&observer].location;
+        world.execute(
+            observer,
+            ProposedAction::Observe {
+                target: ObservationTarget::Location(current),
+            },
+        );
         let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(observation.goals.len(), 4);
+        assert_eq!(
+            observation
+                .goals
+                .iter()
+                .find(|goal| goal.kind == GoalKind::Exploration)
+                .expect("exploration goal")
+                .progress,
+            0.25
+        );
         assert_eq!(
             observation.current_location.serves_food,
             world.locations[&observation.current_location.id].serves_food

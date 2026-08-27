@@ -37,7 +37,9 @@ cargo test
 
 The pipeline is `World → perceive → AgentObservation → DecisionEngine → ProposedAction → World::execute → Event`. IDs, simulation time, actions, rejections, and events are typed. Seed-derived IDs and a seeded random engine make runs reproducible.
 
-Agents retain their 20 most recent witnessed movements, conversations, and observations. These subjective memories are persisted with checkpoints and included in future decisions; unseen events and idle waits are omitted. Beliefs remain intentionally unimplemented.
+Agents retain their 20 most recent witnessed movements, conversations, activities, and goal completions. These subjective memories are persisted with checkpoints and included in future decisions; unseen events and idle waits are omitted. Beliefs remain intentionally unimplemented.
+
+Each resident has livelihood, community, exploration, and wellbeing goals. Successful matching actions advance bounded progress and emit one completion event at 100%; decision engines receive that subjective progress and prioritize feasible unfinished goals after urgent needs.
 
 Needs are satisfaction values that decay with simulated time and recover through successful actions. The random engine responds to urgent food, energy, companionship, and safety needs, heads to work by day, and returns home at night. `Eat` is available at home and food-serving locations, `Rest` at home, and `Work` at an agent's workplace from 08:00 through 17:59; `Wait` has no activity effects.
 

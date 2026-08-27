@@ -1,7 +1,7 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, VisibleAgent},
-    sim::{ObservationTarget, ProposedAction},
+    sim::{GoalKind, ObservationTarget, ProposedAction},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -105,6 +105,57 @@ impl DecisionEngine for RandomDecisionEngine {
         }
 
         let hour = observation.tick.hour();
+        if !(7..21).contains(&hour) {
+            return Ok(
+                if observation.current_location.id == observation.self_description.home.id {
+                    ProposedAction::Rest
+                } else {
+                    move_or_wait(observation.self_description.home.id)
+                },
+            );
+        }
+
+        for goal in observation.goals.iter().filter(|goal| goal.progress < 1.0) {
+            match goal.kind {
+                GoalKind::Livelihood if (8..18).contains(&hour) => {
+                    if let Some(workplace) = &observation.self_description.workplace {
+                        if observation.current_location.id == workplace.id {
+                            return Ok(ProposedAction::Work);
+                        }
+                        if connected_to(workplace.id) {
+                            return Ok(ProposedAction::Move {
+                                destination: workplace.id,
+                            });
+                        }
+                    }
+                }
+                GoalKind::Community if !observation.visible_agents.is_empty() => {
+                    return Ok(ProposedAction::Talk {
+                        target: preferred_companion(),
+                        message: "Good to see you.".into(),
+                    });
+                }
+                GoalKind::Exploration => {
+                    return Ok(ProposedAction::Observe {
+                        target: ObservationTarget::Location(observation.current_location.id),
+                    });
+                }
+                GoalKind::Wellbeing
+                    if observation.current_location.id == observation.self_description.home.id =>
+                {
+                    return Ok(if needs.food <= needs.energy {
+                        ProposedAction::Eat
+                    } else {
+                        ProposedAction::Rest
+                    });
+                }
+                GoalKind::Wellbeing if observation.current_location.serves_food => {
+                    return Ok(ProposedAction::Eat);
+                }
+                _ => {}
+            }
+        }
+
         if (8..18).contains(&hour)
             && (needs.money < 0.75 || needs.status < 0.75)
             && let Some(workplace) = &observation.self_description.workplace
@@ -114,15 +165,6 @@ impl DecisionEngine for RandomDecisionEngine {
             } else {
                 move_or_wait(workplace.id)
             });
-        }
-        if !(7..21).contains(&hour) {
-            return Ok(
-                if observation.current_location.id == observation.self_description.home.id {
-                    ProposedAction::Rest
-                } else {
-                    move_or_wait(observation.self_description.home.id)
-                },
-            );
         }
 
         Ok(match rng.random_range(0..4) {
@@ -155,7 +197,7 @@ mod tests {
     use super::{DecisionEngine, RandomDecisionEngine};
     use crate::{
         cognition::perceive,
-        sim::{ProposedAction, Relationship, Tick, World},
+        sim::{GoalKind, ObservationTarget, ProposedAction, Relationship, Tick, World},
     };
 
     #[tokio::test]
@@ -235,6 +277,24 @@ mod tests {
             ProposedAction::Talk {
                 target: preferred,
                 message: "Good to see you.".into()
+            }
+        );
+
+        let mut purposeful = lonely;
+        purposeful.self_description.needs.companionship = 0.5;
+        for goal in &mut purposeful.goals {
+            goal.progress = 1.0;
+        }
+        purposeful
+            .goals
+            .iter_mut()
+            .find(|goal| goal.kind == GoalKind::Exploration)
+            .expect("exploration goal")
+            .progress = 0.0;
+        assert_eq!(
+            engine.decide(&purposeful).await.expect("decision"),
+            ProposedAction::Observe {
+                target: ObservationTarget::Location(purposeful.current_location.id)
             }
         );
     }

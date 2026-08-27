@@ -1,5 +1,5 @@
 use super::{AgentId, Event, LocationId, Relationship};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,8 +78,65 @@ impl Needs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Goal(pub String);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalKind {
+    #[default]
+    Livelihood,
+    Community,
+    Exploration,
+    Wellbeing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Goal {
+    pub description: String,
+    pub kind: GoalKind,
+    pub progress: f32,
+}
+
+impl Goal {
+    pub fn new(description: impl Into<String>, kind: GoalKind) -> Self {
+        Self {
+            description: description.into(),
+            kind,
+            progress: 0.0,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Goal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredGoal {
+            Legacy(String),
+            Current {
+                description: String,
+                #[serde(default)]
+                kind: GoalKind,
+                #[serde(default)]
+                progress: f32,
+            },
+        }
+
+        Ok(match StoredGoal::deserialize(deserializer)? {
+            StoredGoal::Legacy(description) => Self::new(description, GoalKind::Livelihood),
+            StoredGoal::Current {
+                description,
+                kind,
+                progress,
+            } => Self {
+                description,
+                kind,
+                progress,
+            },
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
@@ -96,4 +153,17 @@ pub struct Agent {
     pub goals: Vec<Goal>,
     #[serde(default)]
     pub memories: Vec<Event>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Goal, GoalKind};
+
+    #[test]
+    fn legacy_string_goals_remain_loadable() {
+        let goal: Goal = serde_json::from_str("\"Succeed as Alice\"").expect("legacy goal");
+        assert_eq!(goal.description, "Succeed as Alice");
+        assert_eq!(goal.kind, GoalKind::Livelihood);
+        assert_eq!(goal.progress, 0.0);
+    }
 }

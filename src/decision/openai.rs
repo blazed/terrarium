@@ -6,6 +6,7 @@ use std::{net::IpAddr, time::Duration};
 
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
+Prioritize urgent needs, then feasible goals whose progress is below 1.0.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
 {"action":"talk","target":"agent UUID","message":"non-empty text"}
@@ -177,6 +178,7 @@ mod tests {
             let request = read_request(&mut stream);
             assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
             assert!(request.contains("self_description"));
+            assert!(request.contains("progress"));
             assert!(
                 request
                     .to_ascii_lowercase()

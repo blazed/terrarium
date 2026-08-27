@@ -35,6 +35,10 @@ pub enum EventKind {
     Worked {
         agent: AgentId,
     },
+    GoalCompleted {
+        agent: AgentId,
+        goal: String,
+    },
     Waited {
         agent: AgentId,
     },
