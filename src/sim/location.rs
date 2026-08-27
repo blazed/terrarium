@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 pub struct Location {
     pub id: LocationId,
     pub name: String,
+    #[serde(default)]
+    pub serves_food: bool,
     pub connected: BTreeSet<LocationId>,
     pub agents: BTreeSet<AgentId>,
 }

@@ -1,6 +1,6 @@
 use crate::sim::{
-    AgentId, Event, EventKind, LocationId, Needs, ObservationTarget, Occupation, Personality, Tick,
-    World,
+    AgentId, Event, EventKind, LocationId, Needs, ObservationTarget, Occupation, Personality,
+    Relationship, Tick, World,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -22,6 +22,8 @@ pub struct SelfDescription {
     pub name: String,
     pub age: u32,
     pub occupation: Occupation,
+    pub home: LocationSummary,
+    pub workplace: Option<LocationSummary>,
     pub personality: Personality,
     pub needs: Needs,
 }
@@ -30,6 +32,7 @@ pub struct SelfDescription {
 pub struct LocationDescription {
     pub id: LocationId,
     pub name: String,
+    pub serves_food: bool,
     pub connected: Vec<LocationSummary>,
 }
 
@@ -37,13 +40,15 @@ pub struct LocationDescription {
 pub struct LocationSummary {
     pub id: LocationId,
     pub name: String,
+    pub serves_food: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VisibleAgent {
     pub id: AgentId,
     pub name: String,
     pub occupation: Occupation,
+    pub relationship: Relationship,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -66,6 +71,19 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         .get(&agent.location)
         .ok_or(ObservationError::UnknownLocation(agent.location))?;
 
+    let summarize_location = |id: LocationId| {
+        let location = world
+            .locations
+            .get(&id)
+            .ok_or(ObservationError::UnknownLocation(id))?;
+        Ok(LocationSummary {
+            id,
+            name: location.name.clone(),
+            serves_food: location.serves_food,
+        })
+    };
+    let home = summarize_location(agent.home)?;
+    let workplace = agent.workplace.map(summarize_location).transpose()?;
     let connected = location
         .connected
         .iter()
@@ -77,6 +95,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             Ok(LocationSummary {
                 id: *id,
                 name: destination.name.clone(),
+                serves_food: destination.serves_food,
             })
         })
         .collect::<Result<Vec<_>, ObservationError>>()?;
@@ -93,6 +112,11 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 id: *id,
                 name: visible.name.clone(),
                 occupation: visible.occupation.clone(),
+                relationship: agent
+                    .relationships
+                    .get(id)
+                    .copied()
+                    .unwrap_or(Relationship::NEUTRAL),
             })
         })
         .collect::<Result<Vec<_>, ObservationError>>()?;
@@ -104,12 +128,15 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             name: agent.name.clone(),
             age: agent.age,
             occupation: agent.occupation.clone(),
+            home,
+            workplace,
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
         },
         current_location: LocationDescription {
             id: location.id,
             name: location.name.clone(),
+            serves_food: location.serves_food,
             connected,
         },
         visible_agents,
@@ -187,6 +214,12 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             };
             format!("{subject} observed {target}.")
         }
+        EventKind::Ate { agent } if *agent == observer => "You ate.".into(),
+        EventKind::Ate { agent } => format!("{} ate.", agent_name(*agent)),
+        EventKind::Rested { agent } if *agent == observer => "You rested.".into(),
+        EventKind::Rested { agent } => format!("{} rested.", agent_name(*agent)),
+        EventKind::Worked { agent } if *agent == observer => "You worked.".into(),
+        EventKind::Worked { agent } => format!("{} worked.", agent_name(*agent)),
         EventKind::Waited { agent } if *agent == observer => "You waited.".into(),
         EventKind::Waited { agent } => format!("{} waited.", agent_name(*agent)),
         EventKind::ActionRejected { agent, .. } if *agent == observer => {
@@ -202,7 +235,7 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ObservationError, perceive};
-    use crate::sim::{ActionResult, AgentId, ProposedAction, World};
+    use crate::sim::{ActionResult, AgentId, ProposedAction, Relationship, World};
     use uuid::Uuid;
 
     #[test]
@@ -226,6 +259,19 @@ mod tests {
             .expect("other resident");
 
         let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(
+            observation.current_location.serves_food,
+            world.locations[&observation.current_location.id].serves_food
+        );
+        assert!(
+            observation
+                .current_location
+                .connected
+                .iter()
+                .all(|location| {
+                    location.serves_food == world.locations[&location.id].serves_food
+                })
+        );
         assert!(
             observation
                 .visible_agents
@@ -235,6 +281,60 @@ mod tests {
         assert_eq!(observation.visible_agents.len(), 6);
         assert!(observation.relevant_memories[0].contains("moved from"));
         assert!(observation.beliefs.is_empty());
+    }
+
+    #[test]
+    fn visible_relationships_are_observer_relative() {
+        let mut world = World::briar_glen(12).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let observer = residents[0];
+        let target = residents[2];
+        let stranger = residents[3];
+        world
+            .agents
+            .get_mut(&observer)
+            .expect("observer")
+            .relationships
+            .insert(
+                target,
+                Relationship {
+                    affection: 0.8,
+                    ..Relationship::NEUTRAL
+                },
+            );
+        world
+            .agents
+            .get_mut(&target)
+            .expect("target")
+            .relationships
+            .insert(
+                observer,
+                Relationship {
+                    affection: -0.8,
+                    ..Relationship::NEUTRAL
+                },
+            );
+
+        let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(
+            observation
+                .visible_agents
+                .iter()
+                .find(|agent| agent.id == target)
+                .expect("target")
+                .relationship
+                .affection,
+            0.8
+        );
+        assert_eq!(
+            observation
+                .visible_agents
+                .iter()
+                .find(|agent| agent.id == stranger)
+                .expect("stranger")
+                .relationship,
+            Relationship::NEUTRAL
+        );
     }
 
     #[test]

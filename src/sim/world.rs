@@ -56,6 +56,10 @@ impl World {
                     Location {
                         id,
                         name: name.into(),
+                        serves_food: matches!(
+                            name,
+                            "The Crooked Lantern" | "Mara's Bakery" | "General Store"
+                        ),
                         connected: BTreeSet::new(),
                         agents: BTreeSet::new(),
                     },
@@ -177,14 +181,17 @@ impl World {
                 proposed,
             });
         }
+        let elapsed = proposed.0 - self.tick.0;
+        for agent in self.agents.values_mut() {
+            agent.needs.decay(elapsed);
+        }
         self.tick = proposed;
         Ok(())
     }
 
     pub fn advance_tick(&mut self) -> Result<(), WorldError> {
         let next = self.tick.0.checked_add(1).ok_or(WorldError::TickOverflow)?;
-        self.tick = Tick(next);
-        Ok(())
+        self.advance_to(Tick(next))
     }
 
     pub fn from_snapshot(
@@ -358,6 +365,9 @@ impl World {
                 }
             }
             ProposedAction::Talk { target, message } => {
+                if target == actor {
+                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
+                }
                 let Some(target_agent) = self.agents.get(&target) else {
                     return self.reject(
                         actor,
@@ -427,11 +437,110 @@ impl World {
                     target,
                 }
             }
+            ProposedAction::Eat => {
+                if current != agent.home && !self.locations[&current].serves_food {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotEatHere(current),
+                    );
+                }
+                EventKind::Ate { agent: actor }
+            }
+            ProposedAction::Rest => {
+                if current != agent.home {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotRestHere(current),
+                    );
+                }
+                EventKind::Rested { agent: actor }
+            }
+            ProposedAction::Work => {
+                if agent.workplace != Some(current) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotWorkHere(current),
+                    );
+                }
+                let hour = self.tick.hour();
+                if !(8..18).contains(&hour) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::OutsideWorkingHours(hour),
+                    );
+                }
+                EventKind::Worked { agent: actor }
+            }
             ProposedAction::Wait => EventKind::Waited { agent: actor },
         };
 
+        self.apply_action_effects(actor, &kind);
         let event = self.append_event(Some(current), kind);
         ActionResult::Success(vec![event])
+    }
+
+    fn apply_action_effects(&mut self, actor: AgentId, kind: &EventKind) {
+        match kind {
+            EventKind::Moved { .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    agent.needs.energy = (agent.needs.energy - 0.01).max(0.0);
+                }
+            }
+            EventKind::Spoke { listener, .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    Needs::restore(&mut agent.needs.companionship, 0.12);
+                    Needs::restore(&mut agent.needs.status, 0.01);
+                }
+                if let Some(agent) = self.agents.get_mut(listener) {
+                    Needs::restore(&mut agent.needs.companionship, 0.08);
+                }
+                self.strengthen_relationship(actor, *listener, 1.0);
+                self.strengthen_relationship(*listener, actor, 0.75);
+            }
+            EventKind::Observed { .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    Needs::restore(&mut agent.needs.safety, 0.03);
+                }
+            }
+            EventKind::Ate { .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    Needs::restore(&mut agent.needs.food, 0.25);
+                    Needs::restore(&mut agent.needs.energy, 0.01);
+                }
+            }
+            EventKind::Rested { .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    Needs::restore(&mut agent.needs.energy, 0.25);
+                    Needs::restore(&mut agent.needs.safety, 0.05);
+                }
+            }
+            EventKind::Worked { .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    Needs::restore(&mut agent.needs.money, 0.12);
+                    Needs::restore(&mut agent.needs.status, 0.05);
+                    agent.needs.energy = (agent.needs.energy - 0.03).max(0.0);
+                    agent.needs.food = (agent.needs.food - 0.02).max(0.0);
+                }
+            }
+            EventKind::Waited { .. } | EventKind::ActionRejected { .. } => {}
+        }
+    }
+
+    fn strengthen_relationship(&mut self, source: AgentId, target: AgentId, amount: f32) {
+        if let Some(agent) = self.agents.get_mut(&source) {
+            let relationship = agent
+                .relationships
+                .entry(target)
+                .or_insert(Relationship::NEUTRAL);
+            relationship.affection = (relationship.affection + 0.02 * amount).min(1.0);
+            relationship.trust = (relationship.trust + 0.015 * amount).min(1.0);
+            relationship.respect = (relationship.respect + 0.005 * amount).min(1.0);
+            relationship.suspicion = (relationship.suspicion - 0.01 * amount).max(-1.0);
+        }
     }
 
     fn reject(
@@ -481,6 +590,11 @@ impl World {
                 if let ObservationTarget::Agent(agent) = target {
                     witnesses.insert(*agent);
                 }
+            }
+            EventKind::Ate { agent }
+            | EventKind::Rested { agent }
+            | EventKind::Worked { agent } => {
+                witnesses.insert(*agent);
             }
             EventKind::Waited { .. } | EventKind::ActionRejected { .. } => return,
         }
@@ -543,13 +657,11 @@ impl World {
                     "agent {id} has non-normalized traits"
                 )));
             }
-            if agent
-                .relationships
-                .values()
-                .any(|relationship| !relationship.is_normalized())
-            {
+            if agent.relationships.iter().any(|(target, relationship)| {
+                target == id || !self.agents.contains_key(target) || !relationship.is_normalized()
+            }) {
                 return Err(WorldError::InvalidState(format!(
-                    "agent {id} has a non-normalized relationship"
+                    "agent {id} has an invalid relationship"
                 )));
             }
             if agent.memories.len() > MEMORY_LIMIT {
@@ -565,8 +677,8 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, AgentId, EventKind, ObservationTarget, ProposedAction, Tick,
-        World, WorldError,
+        ActionRejection, ActionResult, AgentId, EventKind, ObservationTarget, ProposedAction,
+        Relationship, Tick, World, WorldError,
     };
     use uuid::Uuid;
 
@@ -596,6 +708,94 @@ mod tests {
                 current: Tick(2),
                 proposed: Tick(1),
             })
+        );
+    }
+
+    #[test]
+    fn time_and_successful_actions_update_needs() {
+        let mut world = World::briar_glen(2).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let actor = residents[0];
+        let listener = residents[1];
+        let before = world.agents[&actor].needs.clone();
+
+        world.advance_tick().expect("tick");
+        let decayed = &world.agents[&actor].needs;
+        assert!(decayed.food < before.food);
+        assert!(decayed.energy < before.energy);
+        assert!(decayed.companionship < before.companionship);
+
+        let companionship = decayed.companionship;
+        world.execute(
+            actor,
+            ProposedAction::Talk {
+                target: listener,
+                message: "Hello.".into(),
+            },
+        );
+        assert!(world.agents[&actor].needs.companionship > companionship);
+
+        let needs = world.agents[&actor].needs.clone();
+        world.execute(actor, ProposedAction::Eat);
+        assert!(world.agents[&actor].needs.food > needs.food);
+        let energy = world.agents[&actor].needs.energy;
+        let safety = world.agents[&actor].needs.safety;
+        world.execute(actor, ProposedAction::Rest);
+        assert!(world.agents[&actor].needs.energy > energy);
+        assert!(world.agents[&actor].needs.safety > safety);
+        assert!(
+            world.agents[&listener]
+                .memories
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::Ate { agent } if agent == actor))
+        );
+        world.validate().expect("normalized needs");
+    }
+
+    #[test]
+    fn work_and_activity_locations_are_authoritative() {
+        let mut world = World::briar_glen(3).expect("town");
+        let actor = *world
+            .agents
+            .values()
+            .find(|agent| {
+                agent
+                    .workplace
+                    .is_some_and(|id| !world.locations[&id].serves_food)
+            })
+            .map(|agent| &agent.id)
+            .expect("non-food workplace");
+        let workplace = world.agents[&actor].workplace.expect("workplace");
+        world.advance_to(Tick(8 * 12)).expect("morning");
+        assert!(matches!(
+            world.execute(
+                actor,
+                ProposedAction::Move {
+                    destination: workplace
+                }
+            ),
+            ActionResult::Success(_)
+        ));
+
+        let needs = world.agents[&actor].needs.clone();
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Work),
+            ActionResult::Success(_)
+        ));
+        assert!(world.agents[&actor].needs.money > needs.money);
+        assert_eq!(
+            world.execute(actor, ProposedAction::Eat),
+            ActionResult::Rejected(ActionRejection::CannotEatHere(workplace))
+        );
+        assert_eq!(
+            world.execute(actor, ProposedAction::Rest),
+            ActionResult::Rejected(ActionRejection::CannotRestHere(workplace))
+        );
+
+        world.advance_to(Tick(18 * 12)).expect("evening");
+        assert_eq!(
+            world.execute(actor, ProposedAction::Work),
+            ActionResult::Rejected(ActionRejection::OutsideWorkingHours(18))
         );
     }
 
@@ -674,6 +874,75 @@ mod tests {
                 .iter()
                 .any(|memory| matches!(memory.kind, EventKind::Spoke { .. }))
         );
+    }
+
+    #[test]
+    fn conversations_build_bounded_mutual_relationships() {
+        let mut world = World::briar_glen(42).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[2];
+        assert!(!world.agents[&speaker].relationships.contains_key(&listener));
+        assert!(!world.agents[&listener].relationships.contains_key(&speaker));
+
+        for _ in 0..200 {
+            assert!(matches!(
+                world.execute(
+                    speaker,
+                    ProposedAction::Talk {
+                        target: listener,
+                        message: "Good to see you.".into(),
+                    }
+                ),
+                ActionResult::Success(_)
+            ));
+        }
+
+        let speaker_view = world.agents[&speaker].relationships[&listener];
+        let listener_view = world.agents[&listener].relationships[&speaker];
+        assert_eq!(speaker_view.affection, 1.0);
+        assert_eq!(listener_view.affection, 1.0);
+        assert_eq!(speaker_view.suspicion, -1.0);
+        assert!(speaker_view.is_normalized() && listener_view.is_normalized());
+        world.validate().expect("valid relationships");
+    }
+
+    #[test]
+    fn invalid_relationship_targets_and_self_talk_are_rejected() {
+        let mut world = World::briar_glen(43).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        assert_eq!(
+            world.execute(
+                actor,
+                ProposedAction::Talk {
+                    target: actor,
+                    message: "Hello, me.".into(),
+                }
+            ),
+            ActionResult::Rejected(ActionRejection::SelfTarget(actor))
+        );
+
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .relationships
+            .insert(actor, Relationship::NEUTRAL);
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .relationships
+            .remove(&actor);
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .relationships
+            .insert(AgentId(Uuid::nil()), Relationship::NEUTRAL);
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 
     #[test]

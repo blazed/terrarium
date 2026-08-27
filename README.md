@@ -39,4 +39,8 @@ The pipeline is `World → perceive → AgentObservation → DecisionEngine → 
 
 Agents retain their 20 most recent witnessed movements, conversations, and observations. These subjective memories are persisted with checkpoints and included in future decisions; unseen events and idle waits are omitted. Beliefs remain intentionally unimplemented.
 
+Needs are satisfaction values that decay with simulated time and recover through successful actions. The random engine responds to urgent food, energy, companionship, and safety needs, heads to work by day, and returns home at night. `Eat` is available at home and food-serving locations, `Rest` at home, and `Work` at an agent's workplace from 08:00 through 17:59; `Wait` has no activity effects.
+
+Conversations strengthen both residents' directional affection, trust, and respect while reducing suspicion. Observations expose only the observer's relationship toward each visible resident, and the random engine prefers stronger relationships when choosing conversation partners.
+
 Model decisions use strict JSON proposals through the same authoritative validation path as random decisions.

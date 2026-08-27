@@ -62,6 +62,20 @@ impl Needs {
         .into_iter()
         .all(|value| (0.0..=1.0).contains(&value))
     }
+
+    pub(super) fn decay(&mut self, ticks: u64) {
+        let ticks = ticks as f32;
+        self.money = (self.money - 0.0002 * ticks).max(0.0);
+        self.food = (self.food - 0.001 * ticks).max(0.0);
+        self.companionship = (self.companionship - 0.0005 * ticks).max(0.0);
+        self.safety = (self.safety - 0.0001 * ticks).max(0.0);
+        self.status = (self.status - 0.0002 * ticks).max(0.0);
+        self.energy = (self.energy - 0.0007 * ticks).max(0.0);
+    }
+
+    pub(super) fn restore(value: &mut f32, amount: f32) {
+        *value = (*value + amount).min(1.0);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

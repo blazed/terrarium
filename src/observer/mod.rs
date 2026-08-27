@@ -31,6 +31,21 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
         .iter()
         .filter(|event| matches!(event.kind, EventKind::Spoke { .. }))
         .count();
+    let meals = world
+        .events()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Ate { .. }))
+        .count();
+    let rests = world
+        .events()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Rested { .. }))
+        .count();
+    let work = world
+        .events()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::Worked { .. }))
+        .count();
     let rejected = world
         .events()
         .iter()
@@ -43,6 +58,9 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
         format!("Events: {}", world.events().len()),
         format!("Moves: {moves}"),
         format!("Conversations: {conversations}"),
+        format!("Meals: {meals}"),
+        format!("Rests: {rests}"),
+        format!("Work: {work}"),
         format!("Rejected actions: {rejected}"),
     ]);
     lines.join("\n")
@@ -71,6 +89,9 @@ fn render_event(world: &World, event: &Event) -> String {
             agent_name(world, *observer),
             target_name(world, target)
         ),
+        EventKind::Ate { agent } => format!("{time}  {} ate", agent_name(world, *agent)),
+        EventKind::Rested { agent } => format!("{time}  {} rested", agent_name(world, *agent)),
+        EventKind::Worked { agent } => format!("{time}  {} worked", agent_name(world, *agent)),
         EventKind::Waited { agent } => format!("{time}  {} waited", agent_name(world, *agent)),
         EventKind::ActionRejected { agent, reason } => format!(
             "{time}  {}'s action was rejected: {reason}",

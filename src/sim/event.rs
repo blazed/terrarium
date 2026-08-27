@@ -26,6 +26,15 @@ pub enum EventKind {
         observer: AgentId,
         target: ObservationTarget,
     },
+    Ate {
+        agent: AgentId,
+    },
+    Rested {
+        agent: AgentId,
+    },
+    Worked {
+        agent: AgentId,
+    },
     Waited {
         agent: AgentId,
     },

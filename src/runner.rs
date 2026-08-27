@@ -81,6 +81,21 @@ mod tests {
         assert!(
             left.events()
                 .iter()
+                .any(|event| matches!(event.kind, EventKind::Ate { .. }))
+        );
+        assert!(
+            left.events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::Rested { .. }))
+        );
+        assert!(
+            left.events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::Worked { .. }))
+        );
+        assert!(
+            left.events()
+                .iter()
                 .any(|event| matches!(event.kind, EventKind::Waited { .. }))
         );
         left.validate().expect("valid world");

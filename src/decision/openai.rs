@@ -11,6 +11,9 @@ Return only one JSON object matching exactly one of these forms:
 {"action":"talk","target":"agent UUID","message":"non-empty text"}
 {"action":"observe","target":{"target":"agent","id":"agent UUID"}}
 {"action":"observe","target":{"target":"location","id":"location UUID"}}
+{"action":"eat"}
+{"action":"rest"}
+{"action":"work"}
 {"action":"wait"}
 The simulation validates your proposal and remains authoritative."#;
 
@@ -179,7 +182,7 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer test-secret")
             );
-            let body = r#"{"choices":[{"message":{"content":"{\"action\":\"wait\"}"}}]}"#;
+            let body = r#"{"choices":[{"message":{"content":"{\"action\":\"eat\"}"}}]}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -202,7 +205,7 @@ mod tests {
         .expect("API key");
         let action = engine.decide(&observation).await.expect("action");
 
-        assert_eq!(action, ProposedAction::Wait);
+        assert_eq!(action, ProposedAction::Eat);
         assert!(matches!(
             world.execute(actor, action),
             ActionResult::Success(_)
