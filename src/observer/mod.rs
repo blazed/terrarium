@@ -21,38 +21,25 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
         lines.push(render_event(world, event));
     }
 
-    let moves = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Moved { .. }))
-        .count();
-    let conversations = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Spoke { .. }))
-        .count();
-    let meals = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Ate { .. }))
-        .count();
-    let rests = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Rested { .. }))
-        .count();
-    let work = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::Worked { .. }))
-        .count();
-    let rejected = world
-        .events()
-        .iter()
-        .filter(|event| matches!(event.kind, EventKind::ActionRejected { .. }))
-        .count();
-    lines.extend([
-        String::new(),
+    lines.extend([String::new(), render_summary(world)]);
+    lines.join("\n")
+}
+
+pub fn render_summary(world: &World) -> String {
+    let count = |matches: fn(&EventKind) -> bool| {
+        world
+            .events()
+            .iter()
+            .filter(|event| matches(&event.kind))
+            .count()
+    };
+    let moves = count(|kind| matches!(kind, EventKind::Moved { .. }));
+    let conversations = count(|kind| matches!(kind, EventKind::Spoke { .. }));
+    let meals = count(|kind| matches!(kind, EventKind::Ate { .. }));
+    let rests = count(|kind| matches!(kind, EventKind::Rested { .. }));
+    let work = count(|kind| matches!(kind, EventKind::Worked { .. }));
+    let rejected = count(|kind| matches!(kind, EventKind::ActionRejected { .. }));
+    [
         "=== RUN SUMMARY ===".into(),
         format!("Elapsed: {}", world.tick),
         format!("Events: {}", world.events().len()),
@@ -62,11 +49,11 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
         format!("Rests: {rests}"),
         format!("Work: {work}"),
         format!("Rejected actions: {rejected}"),
-    ]);
-    lines.join("\n")
+    ]
+    .join("\n")
 }
 
-fn render_event(world: &World, event: &Event) -> String {
+pub fn render_event(world: &World, event: &Event) -> String {
     let time = format!("{:02}:{:02}", event.tick.hour(), event.tick.minute());
     match &event.kind {
         EventKind::Moved { agent, to, .. } => format!(

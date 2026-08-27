@@ -1,9 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 use terrarium::{
     decision::{OpenAiDecisionEngine, RandomDecisionEngine},
-    observer::render_run_since,
+    observer::{render_event, render_run_since, render_summary},
     persistence::{StoredRun, load_run, load_world, save_world},
-    runner::run_simulation,
+    runner::{run_simulation, run_simulation_with_events},
     sim::{Tick, World},
 };
 use thiserror::Error;
@@ -186,10 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             };
             let world_seed = world.seed;
             let first_event = world.events().len();
-            let world = match decision {
+            let (world, streamed) = match decision {
                 DecisionArgs::Random => {
                     let mut engine = RandomDecisionEngine::new(world_seed);
-                    run_simulation(world, ticks, &mut engine).await?
+                    (run_simulation(world, ticks, &mut engine).await?, false)
                 }
                 DecisionArgs::OpenAi {
                     model,
@@ -197,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     api_key_env,
                 } => {
                     let mut engine =
-                        OpenAiDecisionEngine::new(&base_url, model, Duration::from_secs(30))?;
+                        OpenAiDecisionEngine::new(&base_url, model, Duration::from_secs(120))?;
                     if let Some(name) = api_key_env {
                         let key = std::env::var(&name)
                             .map_err(|_| CliError::MissingApiKey(name.clone()))?;
@@ -205,13 +205,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .with_api_key(key)
                             .map_err(|_| CliError::MissingApiKey(name))?;
                     }
-                    run_simulation(world, ticks, &mut engine).await?
+                    println!(
+                        "{}\nSeed: {}\nAgents: {}\n",
+                        world.name,
+                        world.seed,
+                        world.agents.len()
+                    );
+                    (
+                        run_simulation_with_events(world, ticks, &mut engine, |world, event| {
+                            println!("{}", render_event(world, event));
+                        })
+                        .await?,
+                        true,
+                    )
                 }
             };
             if let Some(path) = database.or(resume) {
                 save_world(path, &world)?;
             }
-            println!("{}", render_run_since(&world, first_event));
+            if streamed {
+                println!("\n{}", render_summary(&world));
+            } else {
+                println!("{}", render_run_since(&world, first_event));
+            }
         }
         Command::Inspect(path) => println!("{}", render_stored_run(&load_run(path)?)?),
     }

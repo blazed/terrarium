@@ -1,7 +1,7 @@
 use crate::{
     cognition::{ObservationError, perceive},
     decision::DecisionEngine,
-    sim::{ProposedAction, Scheduler, World, WorldError},
+    sim::{Event, ProposedAction, Scheduler, World, WorldError},
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -15,9 +15,18 @@ pub enum SimulationError {
 }
 
 pub async fn run_simulation(
+    world: World,
+    ticks: u64,
+    engine: &mut impl DecisionEngine,
+) -> Result<World, SimulationError> {
+    run_simulation_with_events(world, ticks, engine, |_, _| {}).await
+}
+
+pub async fn run_simulation_with_events(
     mut world: World,
     ticks: u64,
     engine: &mut impl DecisionEngine,
+    mut on_event: impl FnMut(&World, &Event),
 ) -> Result<World, SimulationError> {
     let scheduler = Scheduler;
     for _ in 0..ticks {
@@ -32,8 +41,12 @@ pub async fn run_simulation(
                 }
             };
             debug!(?agent, ?action, "executing proposed action");
+            let previous_events = world.events().len();
             world.execute(agent, action);
             world.validate()?;
+            for event in &world.events()[previous_events..] {
+                on_event(&world, event);
+            }
         }
     }
     Ok(world)
@@ -41,7 +54,7 @@ pub async fn run_simulation(
 
 #[cfg(test)]
 mod tests {
-    use super::run_simulation;
+    use super::{run_simulation, run_simulation_with_events};
     use crate::{
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
@@ -55,14 +68,18 @@ mod tests {
         let mut left_engine = RandomDecisionEngine::new(1_234);
         let mut right_engine = RandomDecisionEngine::new(1_234);
 
-        let left = run_simulation(left_world, 2_000, &mut left_engine)
-            .await
-            .expect("simulation");
+        let mut emitted = 0;
+        let left = run_simulation_with_events(left_world, 2_000, &mut left_engine, |_, _| {
+            emitted += 1;
+        })
+        .await
+        .expect("simulation");
         let right = run_simulation(right_world, 2_000, &mut right_engine)
             .await
             .expect("simulation");
 
         assert_eq!(left, right);
+        assert_eq!(emitted, 2_000);
         assert!(
             left.events()
                 .iter()

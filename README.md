@@ -23,7 +23,7 @@ cargo run -- run --ticks 1 --llm-model kimi-k3 --llm-url https://opencode.ai/zen
 
 `--database` atomically stores a resumable checkpoint containing the world's metadata, agents, locations, memories, and ordered events. `--resume PATH` validates and continues that checkpoint, then atomically updates it; combine it with `--database OTHER_PATH` to write elsewhere. `inspect` remains read-only.
 
-`--llm-model` selects an OpenAI-compatible Chat Completions server at `http://localhost:11434/v1` by default; override it with `--llm-url`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
+`--llm-model` selects an OpenAI-compatible Chat Completions server at `http://localhost:11434/v1` by default; override it with `--llm-url`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. LLM action outcomes print immediately as each response arrives. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
 
 ## Validate
 
