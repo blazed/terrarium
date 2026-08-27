@@ -1,4 +1,7 @@
-use crate::sim::{AgentId, LocationId, Needs, Occupation, Personality, Tick, World};
+use crate::sim::{
+    AgentId, Event, EventKind, LocationId, Needs, ObservationTarget, Occupation, Personality, Tick,
+    World,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -111,9 +114,89 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         },
         visible_agents,
         goals: agent.goals.iter().map(|goal| goal.0.clone()).collect(),
-        relevant_memories: Vec::new(),
+        relevant_memories: agent
+            .memories
+            .iter()
+            .map(|memory| describe_memory(world, observer, memory))
+            .collect(),
         beliefs: Vec::new(),
     })
+}
+
+fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
+    let agent_name = |id: AgentId| {
+        world
+            .agents
+            .get(&id)
+            .map_or_else(|| id.to_string(), |agent| agent.name.clone())
+    };
+    let location_name = |id: LocationId| {
+        world
+            .locations
+            .get(&id)
+            .map_or_else(|| id.to_string(), |location| location.name.clone())
+    };
+    let description = match &event.kind {
+        EventKind::Moved { agent, from, to } if *agent == observer => format!(
+            "You moved from {} to {}.",
+            location_name(*from),
+            location_name(*to)
+        ),
+        EventKind::Moved { agent, from, to } => format!(
+            "{} moved from {} to {}.",
+            agent_name(*agent),
+            location_name(*from),
+            location_name(*to)
+        ),
+        EventKind::Spoke {
+            speaker,
+            listener,
+            message,
+        } if *speaker == observer => {
+            format!("You said to {}: {message:?}", agent_name(*listener))
+        }
+        EventKind::Spoke {
+            speaker,
+            listener,
+            message,
+        } if *listener == observer => {
+            format!("{} said to you: {message:?}", agent_name(*speaker))
+        }
+        EventKind::Spoke {
+            speaker,
+            listener,
+            message,
+        } => format!(
+            "{} said to {}: {message:?}",
+            agent_name(*speaker),
+            agent_name(*listener)
+        ),
+        EventKind::Observed {
+            observer: actor,
+            target,
+        } => {
+            let subject = if *actor == observer {
+                "You".into()
+            } else {
+                agent_name(*actor)
+            };
+            let target = match target {
+                ObservationTarget::Agent(agent) if *agent == observer => "you".into(),
+                ObservationTarget::Agent(agent) => agent_name(*agent),
+                ObservationTarget::Location(location) => location_name(*location),
+            };
+            format!("{subject} observed {target}.")
+        }
+        EventKind::Waited { agent } if *agent == observer => "You waited.".into(),
+        EventKind::Waited { agent } => format!("{} waited.", agent_name(*agent)),
+        EventKind::ActionRejected { agent, .. } if *agent == observer => {
+            "Your attempted action was rejected.".into()
+        }
+        EventKind::ActionRejected { agent, .. } => {
+            format!("{} had an action rejected.", agent_name(*agent))
+        }
+    };
+    format!("{}: {description}", event.tick)
 }
 
 #[cfg(test)]
@@ -150,8 +233,52 @@ mod tests {
                 .all(|agent| agent.id != hidden)
         );
         assert_eq!(observation.visible_agents.len(), 6);
-        assert!(observation.relevant_memories.is_empty());
+        assert!(observation.relevant_memories[0].contains("moved from"));
         assert!(observation.beliefs.is_empty());
+    }
+
+    #[test]
+    fn memories_are_relative_and_do_not_include_unseen_events() {
+        let mut world = World::briar_glen(11).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let hidden = residents[0];
+        let speaker = residents[1];
+        let listener = residents[2];
+        let home = world.agents[&hidden].location;
+        let destination = *world.locations[&home]
+            .connected
+            .iter()
+            .next()
+            .expect("destination");
+        world.execute(hidden, ProposedAction::Move { destination });
+        world
+            .agents
+            .get_mut(&hidden)
+            .expect("hidden")
+            .memories
+            .clear();
+        world.execute(
+            speaker,
+            ProposedAction::Talk {
+                target: listener,
+                message: "The lantern is lit.".into(),
+            },
+        );
+
+        let speaker_memory = &perceive(&world, speaker)
+            .expect("speaker")
+            .relevant_memories[1];
+        let listener_memory = &perceive(&world, listener)
+            .expect("listener")
+            .relevant_memories[1];
+        assert!(speaker_memory.contains("You said to"));
+        assert!(listener_memory.contains("said to you"));
+        assert!(
+            perceive(&world, hidden)
+                .expect("hidden")
+                .relevant_memories
+                .is_empty()
+        );
     }
 
     #[test]

@@ -1,6 +1,10 @@
 use crate::sim::{AgentId, Event, EventKind, LocationId, ObservationTarget, World};
 
 pub fn render_run(world: &World) -> String {
+    render_run_since(world, 0)
+}
+
+pub fn render_run_since(world: &World, first_event: usize) -> String {
     let mut lines = vec![
         world.name.clone(),
         format!("Seed: {}", world.seed),
@@ -8,7 +12,7 @@ pub fn render_run(world: &World) -> String {
         String::new(),
     ];
     let mut last_day = 0;
-    for event in world.events() {
+    for event in world.events().iter().skip(first_event) {
         if event.tick.day() != last_day {
             last_day = event.tick.day();
             lines.push(format!("Day {last_day}"));
@@ -100,7 +104,7 @@ fn location_name(world: &World, id: LocationId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_run;
+    use super::{render_run, render_run_since};
     use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
 
     #[tokio::test]
@@ -114,5 +118,10 @@ mod tests {
         assert_eq!(rendered, render_run(&world));
         assert!(rendered.contains("Briar Glen\nSeed: 42\nAgents: 8"));
         assert!(rendered.contains("=== RUN SUMMARY ==="));
+
+        let resumed = render_run_since(&world, 10);
+        assert!(!resumed.contains("00:05  "));
+        assert!(resumed.contains("00:55  "));
+        assert!(resumed.contains("Events: 20"));
     }
 }

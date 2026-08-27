@@ -1,8 +1,8 @@
 use std::{path::PathBuf, time::Duration};
 use terrarium::{
     decision::{OpenAiDecisionEngine, RandomDecisionEngine},
-    observer::render_run,
-    persistence::{StoredRun, load_run, save_world},
+    observer::render_run_since,
+    persistence::{StoredRun, load_run, load_world, save_world},
     runner::run_simulation,
     sim::{Tick, World},
 };
@@ -14,6 +14,7 @@ struct RunArgs {
     seed: u64,
     ticks: u64,
     database: Option<PathBuf>,
+    resume: Option<PathBuf>,
     decision: DecisionArgs,
 }
 
@@ -36,7 +37,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api-key-env NAME]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api-key-env NAME]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -51,6 +52,8 @@ enum CliError {
     DurationOverflow,
     #[error("LLM options require --llm-model")]
     MissingLlmModel,
+    #[error("--seed cannot be used with --resume")]
+    SeedWithResume,
     #[error("environment variable {0} does not contain an API key")]
     MissingApiKey(String),
 }
@@ -72,9 +75,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
 
 fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, CliError> {
     let mut seed = 814_921;
+    let mut seed_was_set = false;
     let mut days = None;
     let mut ticks = None;
     let mut database = None;
+    let mut resume = None;
     let mut llm_model = None;
     let mut llm_url = None;
     let mut llm_api_key_env = None;
@@ -83,10 +88,14 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             .next()
             .ok_or_else(|| CliError::MissingValue(flag.clone()))?;
         match flag.as_str() {
-            "--seed" => seed = parse_number(&flag, value)?,
+            "--seed" => {
+                seed = parse_number(&flag, value)?;
+                seed_was_set = true;
+            }
             "--days" => days = Some(parse_number(&flag, value)?),
             "--ticks" => ticks = Some(parse_number(&flag, value)?),
             "--database" => database = Some(value.into()),
+            "--resume" => resume = Some(value.into()),
             "--llm-model" => llm_model = Some(value),
             "--llm-url" => llm_url = Some(value),
             "--llm-api-key-env" => llm_api_key_env = Some(value),
@@ -96,6 +105,9 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
 
     if days.is_some() && ticks.is_some() {
         return Err(CliError::ConflictingDuration);
+    }
+    if seed_was_set && resume.is_some() {
+        return Err(CliError::SeedWithResume);
     }
     let ticks = match (days, ticks) {
         (Some(days), None) => days
@@ -123,6 +135,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
         seed,
         ticks,
         database,
+        resume,
         decision,
     })
 }
@@ -160,11 +173,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .try_init()?;
     match parse_args(std::env::args().skip(1))? {
         Command::Run(args) => {
-            let world = World::briar_glen(args.seed)?;
-            let world = match args.decision {
+            let RunArgs {
+                seed,
+                ticks,
+                database,
+                resume,
+                decision,
+            } = args;
+            let world = match &resume {
+                Some(path) => load_world(path)?,
+                None => World::briar_glen(seed)?,
+            };
+            let world_seed = world.seed;
+            let first_event = world.events().len();
+            let world = match decision {
                 DecisionArgs::Random => {
-                    let mut engine = RandomDecisionEngine::new(args.seed);
-                    run_simulation(world, args.ticks, &mut engine).await?
+                    let mut engine = RandomDecisionEngine::new(world_seed);
+                    run_simulation(world, ticks, &mut engine).await?
                 }
                 DecisionArgs::OpenAi {
                     model,
@@ -180,13 +205,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .with_api_key(key)
                             .map_err(|_| CliError::MissingApiKey(name))?;
                     }
-                    run_simulation(world, args.ticks, &mut engine).await?
+                    run_simulation(world, ticks, &mut engine).await?
                 }
             };
-            if let Some(path) = args.database {
+            if let Some(path) = database.or(resume) {
                 save_world(path, &world)?;
             }
-            println!("{}", render_run(&world));
+            println!("{}", render_run_since(&world, first_event));
         }
         Command::Inspect(path) => println!("{}", render_stored_run(&load_run(path)?)?),
     }
@@ -218,6 +243,7 @@ mod tests {
                 seed: 1_234,
                 ticks: 8_640,
                 database: Some(PathBuf::from("run.sqlite")),
+                resume: None,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -239,6 +265,7 @@ mod tests {
                 seed: 814_921,
                 ticks: 288,
                 database: None,
+                resume: None,
                 decision: DecisionArgs::OpenAi {
                     model: "qwen3:8b".into(),
                     base_url: "http://localhost:1234/v1".into(),
@@ -256,12 +283,27 @@ mod tests {
                 seed: 814_921,
                 ticks: 10_000,
                 database: None,
+                resume: None,
+                decision: DecisionArgs::Random,
+            }))
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--resume", "run.sqlite", "--ticks", "10"])),
+            Ok(Command::Run(RunArgs {
+                seed: 814_921,
+                ticks: 10,
+                database: None,
+                resume: Some(PathBuf::from("run.sqlite")),
                 decision: DecisionArgs::Random,
             }))
         );
         assert_eq!(
             parse_args(args(&["run", "--days", "1", "--ticks", "2"])),
             Err(CliError::ConflictingDuration)
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--resume", "run.sqlite", "--seed", "1",])),
+            Err(CliError::SeedWithResume)
         );
         assert_eq!(
             parse_args(args(&["run", "--llm-url", "http://localhost:1234/v1"])),

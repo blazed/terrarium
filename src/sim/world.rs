@@ -6,6 +6,8 @@ use super::{
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+const MEMORY_LIMIT: usize = 20;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WorldError {
     #[error("unknown agent {0}")]
@@ -129,6 +131,7 @@ impl World {
                 },
                 relationships: BTreeMap::new(),
                 goals: vec![Goal(format!("Succeed as {name}"))],
+                memories: Vec::new(),
             };
             locations
                 .get_mut(&home)
@@ -184,8 +187,96 @@ impl World {
         Ok(())
     }
 
+    pub fn from_snapshot(
+        name: String,
+        seed: u64,
+        tick: Tick,
+        agents: Vec<Agent>,
+        locations: Vec<Location>,
+        events: Vec<Event>,
+    ) -> Result<Self, WorldError> {
+        let mut agent_map = BTreeMap::new();
+        for agent in agents {
+            let id = agent.id;
+            if agent_map.insert(id, agent).is_some() {
+                return Err(WorldError::InvalidState(format!(
+                    "duplicate agent {id} in checkpoint"
+                )));
+            }
+        }
+        let mut location_map = BTreeMap::new();
+        for location in locations {
+            let id = location.id;
+            if location_map.insert(id, location).is_some() {
+                return Err(WorldError::InvalidState(format!(
+                    "duplicate location {id} in checkpoint"
+                )));
+            }
+        }
+        let world = Self {
+            name,
+            seed,
+            tick,
+            agents: agent_map,
+            locations: location_map,
+            events,
+        };
+        world.validate()?;
+        world.validate_history()?;
+        Ok(world)
+    }
+
     pub fn events(&self) -> &[Event] {
         &self.events
+    }
+
+    fn validate_history(&self) -> Result<(), WorldError> {
+        let mut previous_tick = Tick(0);
+        let history = self
+            .events
+            .iter()
+            .map(|event| (event.id, event))
+            .collect::<BTreeMap<_, _>>();
+        if history.len() != self.events.len() {
+            return Err(WorldError::InvalidState(
+                "checkpoint contains duplicate event IDs".into(),
+            ));
+        }
+        for (index, event) in self.events.iter().enumerate() {
+            if event.id != EventId(seeded_uuid(3, self.seed, index as u32)) {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} is out of sequence",
+                    event.id
+                )));
+            }
+            if event.tick < previous_tick || event.tick > self.tick {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} has an invalid tick",
+                    event.id
+                )));
+            }
+            if event
+                .location
+                .is_some_and(|location| !self.locations.contains_key(&location))
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} references an unknown location",
+                    event.id
+                )));
+            }
+            previous_tick = event.tick;
+        }
+        for agent in self.agents.values() {
+            for memory in &agent.memories {
+                if history.get(&memory.id) != Some(&memory) {
+                    return Err(WorldError::InvalidState(format!(
+                        "agent {} remembers an event absent from history",
+                        agent.id
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn execute(&mut self, actor: AgentId, action: ProposedAction) -> ActionResult {
@@ -367,7 +458,43 @@ impl World {
             kind,
         };
         self.events.push(event.clone());
+        self.remember(&event);
         event
+    }
+
+    fn remember(&mut self, event: &Event) {
+        let mut witnesses = BTreeSet::new();
+        match &event.kind {
+            EventKind::Moved { agent, to, .. } => {
+                witnesses.insert(*agent);
+                if let Some(destination) = self.locations.get(to) {
+                    witnesses.extend(destination.agents.iter().copied());
+                }
+            }
+            EventKind::Spoke {
+                speaker, listener, ..
+            } => {
+                witnesses.extend([*speaker, *listener]);
+            }
+            EventKind::Observed { observer, target } => {
+                witnesses.insert(*observer);
+                if let ObservationTarget::Agent(agent) = target {
+                    witnesses.insert(*agent);
+                }
+            }
+            EventKind::Waited { .. } | EventKind::ActionRejected { .. } => return,
+        }
+        if let Some(location) = event.location.and_then(|id| self.locations.get(&id)) {
+            witnesses.extend(location.agents.iter().copied());
+        }
+
+        for witness in witnesses {
+            if let Some(agent) = self.agents.get_mut(&witness) {
+                agent.memories.push(event.clone());
+                let excess = agent.memories.len().saturating_sub(MEMORY_LIMIT);
+                agent.memories.drain(..excess);
+            }
+        }
     }
 
     pub fn validate(&self) -> Result<(), WorldError> {
@@ -425,6 +552,11 @@ impl World {
                     "agent {id} has a non-normalized relationship"
                 )));
             }
+            if agent.memories.len() > MEMORY_LIMIT {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has too many memories"
+                )));
+            }
         }
         Ok(())
     }
@@ -433,7 +565,8 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, AgentId, EventKind, ProposedAction, Tick, World, WorldError,
+        ActionRejection, ActionResult, AgentId, EventKind, ObservationTarget, ProposedAction, Tick,
+        World, WorldError,
     };
     use uuid::Uuid;
 
@@ -500,6 +633,66 @@ mod tests {
         world
             .validate()
             .expect("movement should preserve invariants");
+    }
+
+    #[test]
+    fn only_present_agents_remember_a_conversation() {
+        let mut world = World::briar_glen(41).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let remote = residents[0];
+        let speaker = residents[1];
+        let listener = residents[2];
+        let home = world.agents[&remote].location;
+        let destination = *world.locations[&home]
+            .connected
+            .iter()
+            .next()
+            .expect("destination");
+        world.execute(remote, ProposedAction::Move { destination });
+        for agent in world.agents.values_mut() {
+            agent.memories.clear();
+        }
+
+        world.execute(
+            speaker,
+            ProposedAction::Talk {
+                target: listener,
+                message: "Did you hear the bells?".into(),
+            },
+        );
+
+        assert!(world.agents[&remote].memories.is_empty());
+        assert!(
+            world.agents[&speaker]
+                .memories
+                .iter()
+                .any(|memory| matches!(memory.kind, EventKind::Spoke { .. }))
+        );
+        assert!(
+            world.agents[&residents[3]]
+                .memories
+                .iter()
+                .any(|memory| matches!(memory.kind, EventKind::Spoke { .. }))
+        );
+    }
+
+    #[test]
+    fn memories_keep_only_the_latest_twenty_events() {
+        let mut world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let location = world.agents[&actor].location;
+
+        for _ in 0..21 {
+            world.execute(
+                actor,
+                ProposedAction::Observe {
+                    target: ObservationTarget::Location(location),
+                },
+            );
+        }
+
+        assert_eq!(world.agents[&actor].memories.len(), 20);
+        assert_eq!(world.agents[&actor].memories[0], world.events()[1]);
     }
 
     #[test]

@@ -4,6 +4,8 @@ use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
+const CHECKPOINT_VERSION: i64 = 1;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
     pub name: String,
@@ -30,6 +32,8 @@ pub enum PersistenceError {
     },
     #[error("too many events to persist")]
     TooManyEvents,
+    #[error("unsupported checkpoint version {0}")]
+    UnsupportedCheckpointVersion(i64),
 }
 
 pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), PersistenceError> {
@@ -54,6 +58,7 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
+         PRAGMA user_version = 1;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
@@ -131,6 +136,26 @@ pub fn load_run(path: impl AsRef<Path>) -> Result<StoredRun, PersistenceError> {
     })
 }
 
+pub fn load_world(path: impl AsRef<Path>) -> Result<World, PersistenceError> {
+    let path = path.as_ref();
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != CHECKPOINT_VERSION {
+        return Err(PersistenceError::UnsupportedCheckpointVersion(version));
+    }
+    drop(connection);
+
+    let run = load_run(path)?;
+    Ok(World::from_snapshot(
+        run.name,
+        run.seed,
+        run.tick,
+        run.agents,
+        run.locations,
+        run.events,
+    )?)
+}
+
 fn parse_number(field: &'static str, value: String) -> Result<u64, PersistenceError> {
     value
         .parse()
@@ -152,13 +177,18 @@ fn load_json_rows<T: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_run, save_world};
+    use super::{PersistenceError, load_run, load_world, save_world};
     use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
-    use std::{env, fs};
+    use rusqlite::Connection;
+    use std::{env, fs, path::PathBuf};
+
+    fn test_path(name: &str) -> PathBuf {
+        env::temp_dir().join(format!("terrarium-{}-{name}.sqlite", std::process::id()))
+    }
 
     #[tokio::test]
     async fn completed_world_round_trips_through_sqlite() {
-        let path = env::temp_dir().join(format!("terrarium-{}.sqlite", std::process::id()));
+        let path = test_path("round-trip");
         let _ = fs::remove_file(&path);
         let world = World::briar_glen(u64::MAX).expect("town");
         let mut engine = RandomDecisionEngine::new(u64::MAX);
@@ -181,6 +211,72 @@ mod tests {
             world.locations.values().cloned().collect::<Vec<_>>()
         );
         assert_eq!(stored.events, world.events());
+        assert!(stored.agents.iter().any(|agent| !agent.memories.is_empty()));
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn split_run_matches_an_uninterrupted_run() {
+        let path = test_path("resume");
+        let _ = fs::remove_file(&path);
+        let seed = 12_345;
+
+        let mut continuous_engine = RandomDecisionEngine::new(seed);
+        let continuous = run_simulation(
+            World::briar_glen(seed).expect("town"),
+            100,
+            &mut continuous_engine,
+        )
+        .await
+        .expect("continuous run");
+
+        let mut first_engine = RandomDecisionEngine::new(seed);
+        let first = run_simulation(
+            World::briar_glen(seed).expect("town"),
+            40,
+            &mut first_engine,
+        )
+        .await
+        .expect("first run");
+        save_world(&path, &first).expect("checkpoint");
+        let resumed = load_world(&path).expect("load checkpoint");
+        let mut resumed_engine = RandomDecisionEngine::new(resumed.seed);
+        let resumed = run_simulation(resumed, 60, &mut resumed_engine)
+            .await
+            .expect("resumed run");
+
+        assert_eq!(resumed, continuous);
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn incompatible_and_corrupt_checkpoints_are_rejected() {
+        let path = test_path("invalid");
+        let _ = fs::remove_file(&path);
+        let seed = 77;
+        let mut engine = RandomDecisionEngine::new(seed);
+        let world = run_simulation(World::briar_glen(seed).expect("town"), 1, &mut engine)
+            .await
+            .expect("run");
+        save_world(&path, &world).expect("checkpoint");
+
+        let connection = Connection::open(&path).expect("database");
+        connection
+            .execute_batch("PRAGMA user_version = 2")
+            .expect("version");
+        assert!(matches!(
+            load_world(&path),
+            Err(PersistenceError::UnsupportedCheckpointVersion(2))
+        ));
+
+        connection
+            .execute_batch("PRAGMA user_version = 1; UPDATE world SET tick = '0'")
+            .expect("corrupt checkpoint");
+        assert!(matches!(
+            load_world(&path),
+            Err(PersistenceError::InvalidWorld(_))
+        ));
+        drop(connection);
         fs::remove_file(path).expect("cleanup");
     }
 }

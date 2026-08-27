@@ -9,6 +9,7 @@ cargo run -- run
 cargo run -- run --seed 814921 --days 7
 cargo run -- run --seed 814921 --ticks 10000
 cargo run -- run --seed 814921 --days 7 --database briar-glen.sqlite
+cargo run -- run --resume briar-glen.sqlite --days 7
 cargo run -- inspect briar-glen.sqlite
 cargo run -- run --ticks 20 --llm-model qwen3:8b
 ```
@@ -20,7 +21,7 @@ $env:OPENCODE_GO_API_KEY = (input --suppress-output "OpenCode Go API key: ")
 cargo run -- run --ticks 1 --llm-model kimi-k3 --llm-url https://opencode.ai/zen/go/v1 --llm-api-key-env OPENCODE_GO_API_KEY
 ```
 
-`--database` atomically stores the completed world's metadata, agents, locations, and ordered events in SQLite. `inspect` reads that database in a later process.
+`--database` atomically stores a resumable checkpoint containing the world's metadata, agents, locations, memories, and ordered events. `--resume PATH` validates and continues that checkpoint, then atomically updates it; combine it with `--database OTHER_PATH` to write elsewhere. `inspect` remains read-only.
 
 `--llm-model` selects an OpenAI-compatible Chat Completions server at `http://localhost:11434/v1` by default; override it with `--llm-url`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
 
@@ -36,4 +37,6 @@ cargo test
 
 The pipeline is `World → perceive → AgentObservation → DecisionEngine → ProposedAction → World::execute → Event`. IDs, simulation time, actions, rejections, and events are typed. Seed-derived IDs and a seeded random engine make runs reproducible.
 
-Persistence is a completed-run snapshot rather than resumable simulation state. Model decisions use strict JSON proposals through the same authoritative validation path as random decisions.
+Agents retain their 20 most recent witnessed movements, conversations, and observations. These subjective memories are persisted with checkpoints and included in future decisions; unseen events and idle waits are omitted. Beliefs remain intentionally unimplemented.
+
+Model decisions use strict JSON proposals through the same authoritative validation path as random decisions.
