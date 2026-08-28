@@ -28,36 +28,20 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
 }
 
 pub fn render_dashboard(world: &World) -> String {
-    // ponytail: recount the small event log; cache counters if long live runs make redraws slow.
-    let mut counts = [0; 8];
-    for event in world.events() {
-        let index = match &event.kind {
-            EventKind::Moved { .. } => 0,
-            EventKind::Spoke { .. } => 1,
-            EventKind::Confronted { .. } => 2,
-            EventKind::Purchased { .. } => 3,
-            EventKind::Rested { .. } => 4,
-            EventKind::Worked { .. } => 5,
-            EventKind::GoalCompleted { .. } => 6,
-            EventKind::ActionRejected { .. } => 7,
-            EventKind::Observed { .. } | EventKind::Waited { .. } => continue,
-        };
-        counts[index] += 1;
-    }
-
+    let counts = event_counts(world);
     let mut lines = vec![
         format!("=== {} — {} ===", world.name, world.tick),
         format!(
             "Events: {} | Moves: {} | Talks: {} | Confrontations: {} | Rejected: {}",
             world.events().len(),
-            counts[0],
-            counts[1],
-            counts[2],
-            counts[7]
+            counts.moves,
+            counts.conversations,
+            counts.confrontations,
+            counts.rejected
         ),
         format!(
             "Purchases: {} | Rests: {} | Work: {} | Goals completed: {}",
-            counts[3], counts[4], counts[5], counts[6]
+            counts.purchases, counts.rests, counts.work, counts.goals
         ),
         String::new(),
         "RESIDENTS".into(),
@@ -140,34 +124,51 @@ pub fn render_dashboard(world: &World) -> String {
     lines.join("\n")
 }
 
+#[derive(Default)]
+struct EventCounts {
+    moves: usize,
+    conversations: usize,
+    confrontations: usize,
+    purchases: usize,
+    rests: usize,
+    work: usize,
+    goals: usize,
+    rejected: usize,
+}
+
+fn event_counts(world: &World) -> EventCounts {
+    // ponytail: recount the small event log; cache counters if long live runs make redraws slow.
+    let mut counts = EventCounts::default();
+    for event in world.events() {
+        match &event.kind {
+            EventKind::Moved { .. } => counts.moves += 1,
+            EventKind::Spoke { .. } => counts.conversations += 1,
+            EventKind::Confronted { .. } => counts.confrontations += 1,
+            EventKind::Purchased { .. } => counts.purchases += 1,
+            EventKind::Rested { .. } => counts.rests += 1,
+            EventKind::Worked { .. } => counts.work += 1,
+            EventKind::GoalCompleted { .. } => counts.goals += 1,
+            EventKind::ActionRejected { .. } => counts.rejected += 1,
+            EventKind::Observed { .. } | EventKind::Waited { .. } => {}
+        }
+    }
+    counts
+}
+
 pub fn render_summary(world: &World) -> String {
-    let count = |matches: fn(&EventKind) -> bool| {
-        world
-            .events()
-            .iter()
-            .filter(|event| matches(&event.kind))
-            .count()
-    };
-    let moves = count(|kind| matches!(kind, EventKind::Moved { .. }));
-    let conversations = count(|kind| matches!(kind, EventKind::Spoke { .. }));
-    let confrontations = count(|kind| matches!(kind, EventKind::Confronted { .. }));
-    let purchases = count(|kind| matches!(kind, EventKind::Purchased { .. }));
-    let rests = count(|kind| matches!(kind, EventKind::Rested { .. }));
-    let work = count(|kind| matches!(kind, EventKind::Worked { .. }));
-    let goals = count(|kind| matches!(kind, EventKind::GoalCompleted { .. }));
-    let rejected = count(|kind| matches!(kind, EventKind::ActionRejected { .. }));
+    let counts = event_counts(world);
     [
         "=== RUN SUMMARY ===".into(),
         format!("Elapsed: {}", world.tick),
         format!("Events: {}", world.events().len()),
-        format!("Moves: {moves}"),
-        format!("Conversations: {conversations}"),
-        format!("Confrontations: {confrontations}"),
-        format!("Purchases: {purchases}"),
-        format!("Rests: {rests}"),
-        format!("Work: {work}"),
-        format!("Goals completed: {goals}"),
-        format!("Rejected actions: {rejected}"),
+        format!("Moves: {}", counts.moves),
+        format!("Conversations: {}", counts.conversations),
+        format!("Confrontations: {}", counts.confrontations),
+        format!("Purchases: {}", counts.purchases),
+        format!("Rests: {}", counts.rests),
+        format!("Work: {}", counts.work),
+        format!("Goals completed: {}", counts.goals),
+        format!("Rejected actions: {}", counts.rejected),
     ]
     .join("\n")
 }
@@ -244,20 +245,9 @@ fn strongest_relationship(world: &World, agent: &Agent) -> String {
     agent
         .relationships
         .iter()
-        .max_by(|left, right| {
-            let score = |relationship: &crate::sim::Relationship| {
-                relationship.affection + relationship.trust + relationship.respect
-                    - relationship.suspicion
-            };
-            score(left.1).total_cmp(&score(right.1))
-        })
+        .max_by(|left, right| left.1.score().total_cmp(&right.1.score()))
         .map(|(id, relationship)| {
-            format!(
-                "{} {:+.1}",
-                agent_name(world, *id),
-                relationship.affection + relationship.trust + relationship.respect
-                    - relationship.suspicion
-            )
+            format!("{} {:+.1}", agent_name(world, *id), relationship.score())
         })
         .unwrap_or_else(|| "—".into())
 }

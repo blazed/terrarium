@@ -227,14 +227,12 @@ fn parse_number(flag: &str, value: String) -> Result<u64, CliError> {
 
 struct LiveScreen {
     terminal: bool,
-    error: Option<io::Error>,
 }
 
 impl LiveScreen {
     fn start() -> io::Result<Self> {
         let mut screen = Self {
             terminal: io::stdout().is_terminal(),
-            error: None,
         };
         if screen.terminal {
             screen.write("\x1b[?1049h\x1b[?25l")?;
@@ -243,10 +241,8 @@ impl LiveScreen {
     }
 
     fn draw(&mut self, world: &World) {
-        if self.terminal && self.error.is_none() {
-            self.error = self
-                .write(&format!("\x1b[H\x1b[2J{}", render_dashboard(world)))
-                .err();
+        if self.terminal {
+            let _ = self.write(&format!("\x1b[H\x1b[2J{}", render_dashboard(world)));
         }
     }
 
@@ -254,10 +250,6 @@ impl LiveScreen {
         let mut output = io::stdout().lock();
         output.write_all(text.as_bytes())?;
         output.flush()
-    }
-
-    fn finish(mut self) -> io::Result<()> {
-        self.error.take().map_or(Ok(()), Err)
     }
 }
 
@@ -280,7 +272,6 @@ async fn run_live(
         screen.draw(world);
     })
     .await;
-    screen.finish()?;
     Ok(result?)
 }
 

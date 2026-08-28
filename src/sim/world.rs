@@ -245,7 +245,6 @@ impl World {
             });
         }
         let elapsed = proposed.0 - self.tick.0;
-        let locations = &self.locations;
         for agent in self.agents.values_mut() {
             agent.needs.decay(elapsed);
             agent.decay_mood(elapsed);
@@ -258,26 +257,11 @@ impl World {
             {
                 agent.activity = None;
             }
-            let interrupt_intention = agent.intention.as_ref().is_some_and(|intention| {
-                let destination_closed = match &intention.goal {
-                    IntentionGoal::Visit { destination } => locations
-                        .get(destination)
-                        .is_none_or(|location| !location.is_open(proposed.hour())),
-                    IntentionGoal::Purchase { destination } => locations
-                        .get(destination)
-                        .is_none_or(|location| !location.is_open(proposed.hour())),
-                    _ => false,
-                };
-                let urgent_conflict = match &intention.goal {
-                    IntentionGoal::Purchase { .. } => {
-                        agent.needs.energy < 0.1 || agent.needs.safety < 0.1
-                    }
-                    IntentionGoal::Rest => agent.needs.food < 0.1 || agent.needs.safety < 0.1,
-                    _ => urgent,
-                };
-                intention.expires_at <= proposed || destination_closed || urgent_conflict
-            });
-            if interrupt_intention {
+            if agent
+                .intention
+                .as_ref()
+                .is_some_and(|intention| intention.expires_at <= proposed)
+            {
                 agent.intention = None;
             }
             agent.goals.retain(|goal| goal.expires_at > proposed);
@@ -889,6 +873,31 @@ impl World {
         }
     }
 
+    pub(crate) fn shortest_open_route(
+        &self,
+        from: LocationId,
+        targets: &BTreeSet<LocationId>,
+    ) -> Option<(LocationId, LocationId, u32)> {
+        if targets.contains(&from) || !self.locations.contains_key(&from) {
+            return None;
+        }
+        let mut queue = VecDeque::from([(from, from, 0)]);
+        let mut visited = BTreeSet::from([from]);
+        while let Some((location, first_step, distance)) = queue.pop_front() {
+            for next in &self.locations[&location].connected {
+                if !visited.insert(*next) || !self.locations[next].is_open(self.tick.hour()) {
+                    continue;
+                }
+                let first_step = if location == from { *next } else { first_step };
+                if targets.contains(next) {
+                    return Some((*next, first_step, distance + 1));
+                }
+                queue.push_back((*next, first_step, distance + 1));
+            }
+        }
+        None
+    }
+
     fn next_route_step(
         &self,
         from: LocationId,
@@ -900,21 +909,9 @@ impl World {
         if from == destination {
             return Ok(None);
         }
-        let mut queue = VecDeque::from([(from, None)]);
-        let mut visited = BTreeSet::from([from]);
-        while let Some((location, first_step)) = queue.pop_front() {
-            for next in &self.locations[&location].connected {
-                if !visited.insert(*next) || !self.locations[next].is_open(self.tick.hour()) {
-                    continue;
-                }
-                let first_step = first_step.or(Some(*next));
-                if *next == destination {
-                    return Ok(first_step);
-                }
-                queue.push_back((*next, first_step));
-            }
-        }
-        Err(ActionRejection::NoRoute { from, destination })
+        self.shortest_open_route(from, &BTreeSet::from([destination]))
+            .map(|(_, next, _)| Some(next))
+            .ok_or(ActionRejection::NoRoute { from, destination })
     }
 
     fn intention_complete(&self, actor: AgentId, goal: &IntentionGoal) -> bool {
@@ -1118,7 +1115,7 @@ impl World {
         if let Some(workplace) = agent.workplace
             && self.locations[&workplace]
                 .business
-                .is_some_and(|business| business.cash >= WORK_WAGE)
+                .is_some_and(Business::solvent)
         {
             candidates.push((
                 agent.personality.ambition + (1.0 - agent.needs.money),
@@ -1145,8 +1142,7 @@ impl World {
                     .get(resident)
                     .copied()
                     .unwrap_or(Relationship::NEUTRAL);
-                relationship.affection + relationship.trust + relationship.respect
-                    - relationship.suspicion
+                relationship.score()
             };
             score(right)
                 .total_cmp(&score(left))
@@ -1200,18 +1196,16 @@ impl World {
             ));
         }
 
-        let marketplace = self
-            .locations
-            .values()
-            .filter(|location| {
-                location.business.is_some_and(|business| business.stock > 0)
-                    && location.is_open(self.tick.hour())
-                    && location
-                        .business
-                        .is_some_and(|business| agent.balance >= business.price)
-                    && self.next_route_step(agent.location, location.id).is_ok()
-            })
-            .collect::<Vec<_>>();
+        let marketplace =
+            self.locations
+                .values()
+                .filter(|location| {
+                    location.business.is_some_and(|business| {
+                        business.stock > 0 && agent.balance >= business.price
+                    }) && location.is_open(self.tick.hour())
+                        && self.next_route_step(agent.location, location.id).is_ok()
+                })
+                .collect::<Vec<_>>();
         for location in marketplace {
             let business = location.business.expect("marketplace");
             let need = match business.offering {
@@ -1272,7 +1266,7 @@ impl World {
             GoalTarget::Work { workplace } => {
                 self.locations[workplace]
                     .business
-                    .is_some_and(|business| business.cash >= WORK_WAGE)
+                    .is_some_and(Business::solvent)
                     && self.locations[workplace].is_open(self.tick.hour())
             }
             _ => true,
@@ -1748,6 +1742,24 @@ impl World {
 }
 
 #[cfg(test)]
+impl World {
+    pub(crate) fn relocate(&mut self, agent: AgentId, destination: LocationId) {
+        let source = self.agents[&agent].location;
+        self.locations
+            .get_mut(&source)
+            .expect("source")
+            .agents
+            .remove(&agent);
+        self.locations
+            .get_mut(&destination)
+            .expect("destination")
+            .agents
+            .insert(agent);
+        self.agents.get_mut(&agent).expect("resident").location = destination;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
@@ -1758,23 +1770,6 @@ mod tests {
     use crate::sim::{ActivityKind, BUSINESS_STARTING_CASH, STOCK_PER_SHIFT, WORK_WAGE};
     use std::collections::BTreeSet;
     use uuid::Uuid;
-
-    fn relocate(world: &mut World, agent: AgentId, destination: super::LocationId) {
-        let source = world.agents[&agent].location;
-        world
-            .locations
-            .get_mut(&source)
-            .expect("source")
-            .agents
-            .remove(&agent);
-        world
-            .locations
-            .get_mut(&destination)
-            .expect("destination")
-            .agents
-            .insert(agent);
-        world.agents.get_mut(&agent).expect("resident").location = destination;
-    }
 
     #[test]
     fn briar_glen_has_consistent_residents() {
@@ -1859,7 +1854,7 @@ mod tests {
         ));
         assert_eq!(world.agents[&actor].activity, None);
 
-        relocate(&mut world, actor, food_business);
+        world.relocate(actor, food_business);
         assert!(matches!(
             world.execute(actor, ProposedAction::Purchase),
             ActionResult::Success(_)
@@ -1898,8 +1893,8 @@ mod tests {
             .find(|location| location.business.is_some() && location.is_open(world.tick.hour()))
             .expect("open food business")
             .id;
-        relocate(&mut world, actor, food_business);
-        relocate(&mut world, listener, food_business);
+        world.relocate(actor, food_business);
+        world.relocate(listener, food_business);
         let before = world.agents[&actor].needs.clone();
 
         world.advance_tick().expect("tick");
@@ -1925,7 +1920,7 @@ mod tests {
         let energy = world.agents[&actor].needs.energy;
         let safety = world.agents[&actor].needs.safety;
         let home = world.agents[&actor].home;
-        relocate(&mut world, actor, home);
+        world.relocate(actor, home);
         world.execute(actor, ProposedAction::Rest);
         assert!(world.agents[&actor].needs.energy > energy);
         assert!(world.agents[&actor].needs.safety > safety);
@@ -1941,7 +1936,7 @@ mod tests {
         let actor = *world.agents.keys().next().expect("resident");
         let business = world.agents[&actor].workplace.expect("workplace");
         assert!(world.locations[&business].business.is_some());
-        relocate(&mut world, actor, business);
+        world.relocate(actor, business);
 
         let balance = world.agents[&actor].balance;
         let initial_stock = world.locations[&business].business.expect("business").stock;
@@ -2073,7 +2068,7 @@ mod tests {
                 .find(|agent| agent.workplace == Some(location))
                 .map(|agent| agent.id)
                 .expect("worker");
-            relocate(&mut world, actor, location);
+            world.relocate(actor, location);
             let agent = world.agents.get_mut(&actor).expect("resident");
             agent.balance = 100;
             agent.needs.food = 0.1;

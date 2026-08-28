@@ -21,6 +21,10 @@ impl Relationship {
         suspicion: 0.0,
     };
 
+    pub fn score(self) -> f32 {
+        self.affection + self.trust + self.respect - self.suspicion
+    }
+
     pub fn is_normalized(self) -> bool {
         [
             self.affection,

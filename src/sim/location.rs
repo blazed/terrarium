@@ -1,4 +1,4 @@
-use super::{AgentId, LocationId};
+use super::{AgentId, LocationId, Needs, WORK_WAGE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -27,6 +27,22 @@ pub enum Offering {
     CivicServices,
 }
 
+impl Offering {
+    pub fn desired(needs: &Needs) -> Option<Self> {
+        if needs.food < 0.25 {
+            Some(Self::Meal)
+        } else if needs.safety < 0.2 {
+            Some(Self::Repairs)
+        } else if needs.safety < 0.4 {
+            Some(Self::Supplies)
+        } else if needs.status < 0.4 {
+            Some(Self::CivicServices)
+        } else {
+            None
+        }
+    }
+}
+
 impl std::fmt::Display for Offering {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
@@ -46,6 +62,12 @@ pub struct Business {
     pub stock: u32,
     pub revenue: u64,
     pub wages_paid: u64,
+}
+
+impl Business {
+    pub fn solvent(self) -> bool {
+        self.cash >= WORK_WAGE
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

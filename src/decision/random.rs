@@ -2,7 +2,7 @@ use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
     sim::{
-        DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, Offering,
+        Business, DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, Offering,
         ProposedAction,
     },
 };
@@ -32,15 +32,15 @@ impl DecisionEngine for RandomDecisionEngine {
         let needs = &observation.self_description.needs;
         let personality = &observation.self_description.personality;
         let mood = observation.self_description.mood;
-        let follow_route = |hint: Option<RouteHint>, goal: fn(RouteHint) -> IntentionGoal| {
+        let follow_route = |hint: Option<RouteHint>, intention: IntentionGoal| {
             hint.filter(|hint| {
                 observation
                     .action_affordances
                     .move_to
                     .contains(&hint.next_hop)
             })
-            .map_or(ProposedAction::Wait, |hint| ProposedAction::Pursue {
-                intention: goal(hint),
+            .map_or(ProposedAction::Wait, |_| ProposedAction::Pursue {
+                intention,
             })
         };
         let relationship_score = |agent: &VisibleAgent| {
@@ -53,13 +53,7 @@ impl DecisionEngine for RandomDecisionEngine {
                         * (belief.sociability - 0.5 + belief.reliability - 0.5 - belief.hostility)
                 })
                 .unwrap_or_default();
-            relationship.affection
-                + relationship.trust
-                + relationship.respect
-                + relationship.attraction
-                - relationship.fear
-                - relationship.suspicion
-                + belief
+            relationship.score() + relationship.attraction - relationship.fear + belief
         };
         let preferred_companion = || {
             observation
@@ -71,7 +65,8 @@ impl DecisionEngine for RandomDecisionEngine {
                 })
         };
 
-        if needs.food < 0.25 {
+        let desired_offering = Offering::desired(needs);
+        if desired_offering == Some(Offering::Meal) {
             return Ok(purchase_action(observation, Offering::Meal)
                 .or_else(|| work_action(observation))
                 .unwrap_or(ProposedAction::Wait));
@@ -81,7 +76,7 @@ impl DecisionEngine for RandomDecisionEngine {
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    follow_route(observation.route_hints.home, |_| IntentionGoal::Rest)
+                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
                 },
             );
         }
@@ -90,15 +85,8 @@ impl DecisionEngine for RandomDecisionEngine {
         {
             return Ok(talk(observation, companion));
         }
-        if needs.safety < 0.4
-            && let Some(action) = purchase_action(
-                observation,
-                if needs.safety < 0.2 {
-                    Offering::Repairs
-                } else {
-                    Offering::Supplies
-                },
-            )
+        if let Some(offering @ (Offering::Repairs | Offering::Supplies)) = desired_offering
+            && let Some(action) = purchase_action(observation, offering)
         {
             return Ok(action);
         }
@@ -135,7 +123,7 @@ impl DecisionEngine for RandomDecisionEngine {
             });
         }
 
-        if needs.status < 0.4
+        if desired_offering == Some(Offering::CivicServices)
             && let Some(action) = purchase_action(observation, Offering::CivicServices)
         {
             return Ok(action);
@@ -147,7 +135,7 @@ impl DecisionEngine for RandomDecisionEngine {
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    follow_route(observation.route_hints.home, |_| IntentionGoal::Rest)
+                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
                 },
             );
         }
@@ -172,9 +160,7 @@ impl DecisionEngine for RandomDecisionEngine {
                         |location| {
                             location.id == workplace
                                 && location.is_open
-                                && location
-                                    .business
-                                    .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
+                                && location.business.is_some_and(Business::solvent)
                         },
                     ) =>
                 {
@@ -243,14 +229,12 @@ impl DecisionEngine for RandomDecisionEngine {
         if (needs.money < 0.75 || needs.status < 0.75)
             && let Some(workplace) = &observation.self_description.workplace
             && workplace.is_open
-            && workplace
-                .business
-                .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
+            && workplace.business.is_some_and(Business::solvent)
         {
             return Ok(if observation.action_affordances.can_work {
                 ProposedAction::Work
             } else {
-                follow_route(observation.route_hints.workplace, |_| IntentionGoal::Work)
+                follow_route(observation.route_hints.workplace, IntentionGoal::Work)
             });
         }
 
@@ -324,12 +308,7 @@ fn work_action(observation: &AgentObservation) -> Option<ProposedAction> {
         .self_description
         .workplace
         .as_ref()
-        .filter(|workplace| {
-            workplace.is_open
-                && workplace
-                    .business
-                    .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
-        })
+        .filter(|workplace| workplace.is_open && workplace.business.is_some_and(Business::solvent))
         .map(|_| {
             if observation.action_affordances.can_work {
                 ProposedAction::Work
@@ -411,9 +390,7 @@ fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> Di
         .get(&companion.id)
         .copied()
         .unwrap_or_default();
-    let closeness = relationship.affection + relationship.trust + relationship.respect
-        - relationship.fear
-        - relationship.suspicion;
+    let closeness = relationship.score() - relationship.fear;
 
     if closeness < -0.5
         || belief.hostility * belief.confidence > 0.35

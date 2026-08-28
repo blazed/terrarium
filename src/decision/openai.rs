@@ -411,7 +411,6 @@ mod tests {
             assert!(request.contains(r#"\"route_hints\":"#));
             assert!(request.contains(r#"\"can_work\":false"#));
             assert!(request.contains(r#"\"balance\":20"#));
-            assert!(request.contains(r#"\"purchase_price\":"#));
             assert!(request.contains(r#"\"offering\":\"meal\""#));
             assert!(request.contains(r#"\"price\":5"#));
             assert!(request.contains(r#"\"cash\":100"#));
