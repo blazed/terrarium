@@ -1,8 +1,12 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    io::{self, IsTerminal, Write},
+    path::PathBuf,
+    time::Duration,
+};
 use terrarium::{
     decision::{OpenAiApi, OpenAiDecisionEngine, RandomDecisionEngine, ReasoningEffort},
-    observer::{render_event, render_run_since, render_summary},
-    persistence::{StoredRun, load_run, load_world, save_world},
+    observer::{render_dashboard, render_event, render_run_since, render_summary},
+    persistence::{load_world, save_world},
     runner::{run_simulation, run_simulation_with_events},
     sim::{Tick, World},
 };
@@ -15,6 +19,7 @@ struct RunArgs {
     ticks: u64,
     database: Option<PathBuf>,
     resume: Option<PathBuf>,
+    live: bool,
     decision: DecisionArgs,
 }
 
@@ -42,7 +47,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -95,7 +100,12 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut llm_reasoning_effort = None;
     let mut llm_max_completion_tokens = None;
     let mut llm_provider = None;
+    let mut live = false;
     while let Some(flag) = args.next() {
+        if flag == "--live" {
+            live = true;
+            continue;
+        }
         let value = args
             .next()
             .ok_or_else(|| CliError::MissingValue(flag.clone()))?;
@@ -203,6 +213,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
         ticks,
         database,
         resume,
+        live,
         decision,
     })
 }
@@ -214,20 +225,63 @@ fn parse_number(flag: &str, value: String) -> Result<u64, CliError> {
     })
 }
 
-fn render_stored_run(run: &StoredRun) -> Result<String, serde_json::Error> {
-    let mut lines = vec![
-        run.name.clone(),
-        format!("Seed: {}", run.seed),
-        format!("Elapsed: {}", run.tick),
-        format!("Agents: {}", run.agents.len()),
-        format!("Locations: {}", run.locations.len()),
-        format!("Events: {}", run.events.len()),
-        String::new(),
-    ];
-    for event in &run.events {
-        lines.push(serde_json::to_string(event)?);
+struct LiveScreen {
+    terminal: bool,
+    error: Option<io::Error>,
+}
+
+impl LiveScreen {
+    fn start() -> io::Result<Self> {
+        let mut screen = Self {
+            terminal: io::stdout().is_terminal(),
+            error: None,
+        };
+        if screen.terminal {
+            screen.write("\x1b[?1049h\x1b[?25l")?;
+        }
+        Ok(screen)
     }
-    Ok(lines.join("\n"))
+
+    fn draw(&mut self, world: &World) {
+        if self.terminal && self.error.is_none() {
+            self.error = self
+                .write(&format!("\x1b[H\x1b[2J{}", render_dashboard(world)))
+                .err();
+        }
+    }
+
+    fn write(&mut self, text: &str) -> io::Result<()> {
+        let mut output = io::stdout().lock();
+        output.write_all(text.as_bytes())?;
+        output.flush()
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.error.take().map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for LiveScreen {
+    fn drop(&mut self) {
+        if self.terminal {
+            let _ = self.write("\x1b[?25h\x1b[?1049l");
+        }
+    }
+}
+
+async fn run_live(
+    world: World,
+    ticks: u64,
+    engine: &mut impl terrarium::decision::DecisionEngine,
+) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
+    let mut screen = LiveScreen::start()?;
+    screen.draw(&world);
+    let result = run_simulation_with_events(world, ticks, engine, |world, _| {
+        screen.draw(world);
+    })
+    .await;
+    screen.finish()?;
+    Ok(result?)
 }
 
 #[tokio::main]
@@ -245,6 +299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ticks,
                 database,
                 resume,
+                live,
                 decision,
             } = args;
             let world = match &resume {
@@ -256,7 +311,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let (world, streamed) = match decision {
                 DecisionArgs::Random => {
                     let mut engine = RandomDecisionEngine::new(world_seed);
-                    (run_simulation(world, ticks, &mut engine).await?, false)
+                    if live {
+                        (run_live(world, ticks, &mut engine).await?, false)
+                    } else {
+                        (run_simulation(world, ticks, &mut engine).await?, false)
+                    }
                 }
                 DecisionArgs::OpenAi {
                     model,
@@ -291,31 +350,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .with_api_key(key)
                             .map_err(|_| CliError::MissingApiKey(name))?;
                     }
-                    println!(
-                        "{}\nSeed: {}\nAgents: {}\n",
-                        world.name,
-                        world.seed,
-                        world.agents.len()
-                    );
-                    (
-                        run_simulation_with_events(world, ticks, &mut engine, |world, event| {
-                            println!("{}", render_event(world, event));
-                        })
-                        .await?,
-                        true,
-                    )
+                    if live {
+                        (run_live(world, ticks, &mut engine).await?, false)
+                    } else {
+                        println!(
+                            "{}\nSeed: {}\nAgents: {}\n",
+                            world.name,
+                            world.seed,
+                            world.agents.len()
+                        );
+                        (
+                            run_simulation_with_events(
+                                world,
+                                ticks,
+                                &mut engine,
+                                |world, event| {
+                                    println!("{}", render_event(world, event));
+                                },
+                            )
+                            .await?,
+                            true,
+                        )
+                    }
                 }
             };
             if let Some(path) = database.or(resume) {
                 save_world(path, &world)?;
             }
-            if streamed {
+            if live {
+                println!("{}", render_dashboard(&world));
+            } else if streamed {
                 println!("\n{}", render_summary(&world));
             } else {
                 println!("{}", render_run_since(&world, first_event));
             }
         }
-        Command::Inspect(path) => println!("{}", render_stored_run(&load_run(path)?)?),
+        Command::Inspect(path) => println!("{}", render_dashboard(&load_world(path)?)),
     }
     Ok(())
 }
@@ -341,12 +411,14 @@ mod tests {
                 "30",
                 "--database",
                 "run.sqlite",
+                "--live",
             ])),
             Ok(Command::Run(RunArgs {
                 seed: 1_234,
                 ticks: 8_640,
                 database: Some(PathBuf::from("run.sqlite")),
                 resume: None,
+                live: true,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -379,6 +451,7 @@ mod tests {
                 ticks: 288,
                 database: None,
                 resume: None,
+                live: false,
                 decision: DecisionArgs::OpenAi {
                     model: "qwen3:8b".into(),
                     base_url: "http://localhost:1234/v1".into(),
@@ -402,6 +475,7 @@ mod tests {
                 ticks: 10_000,
                 database: None,
                 resume: None,
+                live: false,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -412,6 +486,7 @@ mod tests {
                 ticks: 10,
                 database: None,
                 resume: Some(PathBuf::from("run.sqlite")),
+                live: false,
                 decision: DecisionArgs::Random,
             }))
         );

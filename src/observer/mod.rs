@@ -1,4 +1,6 @@
-use crate::sim::{AgentId, Event, EventKind, LocationId, ObservationTarget, World};
+use crate::sim::{
+    Agent, AgentId, Event, EventKind, IntentionGoal, LocationId, ObservationTarget, World,
+};
 
 pub fn render_run(world: &World) -> String {
     render_run_since(world, 0)
@@ -22,6 +24,94 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
     }
 
     lines.extend([String::new(), render_summary(world)]);
+    lines.join("\n")
+}
+
+pub fn render_dashboard(world: &World) -> String {
+    // ponytail: recount the small event log; cache counters if long live runs make redraws slow.
+    let mut counts = [0; 8];
+    for event in world.events() {
+        let index = match &event.kind {
+            EventKind::Moved { .. } => 0,
+            EventKind::Spoke { .. } => 1,
+            EventKind::Confronted { .. } => 2,
+            EventKind::Ate { .. } => 3,
+            EventKind::Rested { .. } => 4,
+            EventKind::Worked { .. } => 5,
+            EventKind::GoalCompleted { .. } => 6,
+            EventKind::ActionRejected { .. } => 7,
+            EventKind::Observed { .. } | EventKind::Waited { .. } => continue,
+        };
+        counts[index] += 1;
+    }
+
+    let mut lines = vec![
+        format!("=== {} — {} ===", world.name, world.tick),
+        format!(
+            "Events: {} | Moves: {} | Talks: {} | Confrontations: {} | Rejected: {}",
+            world.events().len(),
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[7]
+        ),
+        format!(
+            "Meals: {} | Rests: {} | Work: {} | Goals completed: {}",
+            counts[3], counts[4], counts[5], counts[6]
+        ),
+        String::new(),
+        "RESIDENTS".into(),
+        format!(
+            "{:<12} {:<14} {:<9} {:>6} {:<12} {:<20} {:<14} {:<15} {}",
+            "Name",
+            "Location",
+            "Activity",
+            "Mood",
+            "Urgent",
+            "Goal",
+            "Intention",
+            "Strongest tie",
+            "B/R"
+        ),
+    ];
+    for agent in world.agents.values() {
+        let location = location_name(world, agent.location);
+        let activity = agent
+            .activity
+            .map(|activity| format!("{:?}", activity.kind))
+            .unwrap_or_else(|| "Idle".into());
+        let (need, value) = most_urgent_need(agent);
+        let goal = agent
+            .goals
+            .first()
+            .map(|goal| format!("{} [{}/{}]", goal.description, goal.progress, goal.required))
+            .unwrap_or_else(|| "—".into());
+        let intention = agent
+            .intention
+            .as_ref()
+            .map(|intention| intention_name(world, &intention.goal))
+            .unwrap_or_else(|| "—".into());
+        let relationship = strongest_relationship(world, agent);
+        let rumors = agent.rumors.iter().filter(|rumor| !rumor.resolved).count();
+        lines.push(format!(
+            "{:<12} {:<14} {:<9} {:>+6.2} {:<12} {:<20} {:<14} {:<15} {}/{}",
+            clipped(&agent.name, 12),
+            clipped(&location, 14),
+            activity,
+            agent.mood,
+            format!("{need} {}%", (value * 100.0).round() as u8),
+            clipped(&goal, 20),
+            clipped(&intention, 14),
+            clipped(&relationship, 15),
+            agent.beliefs.len(),
+            rumors,
+        ));
+    }
+
+    lines.extend([String::new(), "RECENT EVENTS".into()]);
+    for event in world.events().iter().rev().take(8).rev() {
+        lines.push(render_event(world, event).replace('\n', " / "));
+    }
     lines.join("\n")
 }
 
@@ -106,6 +196,64 @@ pub fn render_event(world: &World, event: &Event) -> String {
     }
 }
 
+fn strongest_relationship(world: &World, agent: &Agent) -> String {
+    agent
+        .relationships
+        .iter()
+        .max_by(|left, right| {
+            let score = |relationship: &crate::sim::Relationship| {
+                relationship.affection + relationship.trust + relationship.respect
+                    - relationship.suspicion
+            };
+            score(left.1).total_cmp(&score(right.1))
+        })
+        .map(|(id, relationship)| {
+            format!(
+                "{} {:+.1}",
+                agent_name(world, *id),
+                relationship.affection + relationship.trust + relationship.respect
+                    - relationship.suspicion
+            )
+        })
+        .unwrap_or_else(|| "—".into())
+}
+
+fn most_urgent_need(agent: &Agent) -> (&'static str, f32) {
+    [
+        ("money", agent.needs.money),
+        ("food", agent.needs.food),
+        ("company", agent.needs.companionship),
+        ("safety", agent.needs.safety),
+        ("status", agent.needs.status),
+        ("energy", agent.needs.energy),
+    ]
+    .into_iter()
+    .min_by(|left, right| left.1.total_cmp(&right.1))
+    .expect("resident has needs")
+}
+
+fn intention_name(world: &World, goal: &IntentionGoal) -> String {
+    match goal {
+        IntentionGoal::Visit { destination } => {
+            format!("visit {}", location_name(world, *destination))
+        }
+        IntentionGoal::Eat { destination } => {
+            format!("eat at {}", location_name(world, *destination))
+        }
+        IntentionGoal::Rest => "rest".into(),
+        IntentionGoal::Work => "work".into(),
+        IntentionGoal::Talk { target, .. } => format!("talk to {}", agent_name(world, *target)),
+    }
+}
+
+fn clipped(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        value.into()
+    } else {
+        value.chars().take(width - 1).collect::<String>() + "…"
+    }
+}
+
 fn target_name(world: &World, target: &ObservationTarget) -> String {
     match target {
         ObservationTarget::Agent(id) => agent_name(world, *id),
@@ -131,7 +279,7 @@ fn location_name(world: &World, id: LocationId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_event, render_run, render_run_since};
+    use super::{render_dashboard, render_event, render_run, render_run_since};
     use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
 
     #[tokio::test]
@@ -150,5 +298,13 @@ mod tests {
         assert!(!resumed.contains("07:05  "));
         assert!(resumed.contains(&render_event(&world, &world.events()[10])));
         assert!(resumed.contains(&format!("Events: {}", world.events().len())));
+
+        let dashboard = render_dashboard(&world);
+        assert!(dashboard.contains("=== Briar Glen — Day 1"));
+        assert!(dashboard.contains("RESIDENTS"));
+        assert!(dashboard.contains("Strongest tie"));
+        assert!(dashboard.contains("B/R"));
+        assert!(dashboard.contains(&world.agents.values().next().expect("resident").name));
+        assert!(dashboard.contains("RECENT EVENTS"));
     }
 }

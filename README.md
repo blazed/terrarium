@@ -8,6 +8,7 @@ A deterministic social-simulation core for the town of Briar Glen. Eight residen
 cargo run -- run
 cargo run -- run --seed 814921 --days 7
 cargo run -- run --seed 814921 --ticks 10000
+cargo run -- run --seed 814921 --days 1 --live
 cargo run -- run --seed 814921 --days 7 --database briar-glen.sqlite
 cargo run -- run --resume briar-glen.sqlite --days 7
 cargo run -- inspect briar-glen.sqlite
@@ -29,7 +30,7 @@ cargo run -- run --ticks 1 --llm-model kimi-k3 --llm-url https://opencode.ai/zen
 cargo run -- run --ticks 1 --llm-model gpt-5.6-luna --llm-url https://opencode.ai/zen/go/v1 --llm-api responses --llm-api-key-env OPENCODE_GO_API_KEY
 ```
 
-`--database` atomically stores a version-3 resumable checkpoint containing the world's metadata, agents, locations, intentions, memories, and ordered events. `--resume PATH` validates and continues that checkpoint, then atomically updates it; combine it with `--database OTHER_PATH` to write elsewhere. `inspect` remains read-only.
+`--database` atomically stores a version-3 resumable checkpoint containing the world's metadata, agents, locations, intentions, memories, and ordered events. `--resume PATH` validates and continues that checkpoint, then atomically updates it; combine it with `--database OTHER_PATH` to write elsewhere. `--live` shows a read-only dashboard of resident status and recent events, restoring the terminal when the run ends. `inspect` renders the same dashboard from a validated saved checkpoint and remains read-only.
 
 `--llm-model` selects an OpenAI-compatible server at `http://localhost:11434/v1` by default; override it with `--llm-url`. `--llm-api chat` is the default and uses `/chat/completions`; `--llm-api responses` uses `/responses`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable so secrets never appear in process arguments. `--llm-temperature` accepts `0` through `2` (default `0`), `--llm-reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, and `--llm-max-tokens` sets `max_completion_tokens` for Chat Completions or `max_output_tokens` for Responses. OpenRouter's `--llm-provider` pins requests to one provider and disables provider fallbacks. Optional fields are omitted unless configured; model support varies. LLM requests stream output and use the 120-second timeout only for inactivity, so a slow model keeps running while it continues producing data; servers that ignore streaming and return ordinary JSON remain supported. LLM action outcomes print immediately as each response arrives. Model failures are traced and deterministically fall back to `Wait`. Set `RUST_LOG=debug` for detailed tracing.
 
