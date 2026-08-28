@@ -176,7 +176,6 @@ pub struct Rumor {
     pub source: AgentId,
     pub depth: u8,
     pub confidence: f32,
-    #[serde(default)]
     pub resolved: bool,
 }
 
@@ -243,10 +242,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub(super) fn adjust_mood(&mut self, amount: f32) {
-        self.mood = (self.mood + amount).clamp(-1.0, 1.0);
-    }
-
     pub(super) fn decay_mood(&mut self, ticks: u64) {
         let decay = 0.002 * ticks as f32;
         self.mood = if self.mood > 0.0 {
@@ -254,16 +249,6 @@ impl Agent {
         } else {
             (self.mood + decay).min(0.0)
         };
-    }
-
-    pub(super) fn learn_about(
-        &mut self,
-        subject: AgentId,
-        sociability: f32,
-        reliability: f32,
-        hostility: f32,
-    ) {
-        self.learn_about_weighted(subject, sociability, reliability, hostility, 1.0);
     }
 
     pub(super) fn learn_about_weighted(

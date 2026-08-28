@@ -17,6 +17,7 @@ pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Location, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
+pub(crate) use world::event_evidence;
 pub use world::{World, WorldError};
 
 use serde::{Deserialize, Serialize};

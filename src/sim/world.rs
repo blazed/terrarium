@@ -11,7 +11,7 @@ use thiserror::Error;
 const MEMORY_LIMIT: usize = 20;
 const RUMOR_LIMIT: usize = 20;
 
-fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
+pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
     match kind {
         EventKind::Spoke { speaker, tone, .. } => Some(match tone {
             DialogueTone::Friendly => (*speaker, 0.08, 0.0, -0.03),
@@ -332,18 +332,14 @@ impl World {
             previous_tick = event.tick;
         }
         for agent in self.agents.values() {
-            for memory in &agent.memories {
-                if history.get(&memory.id) != Some(&memory) {
+            for event in agent
+                .memories
+                .iter()
+                .chain(agent.rumors.iter().map(|rumor| &rumor.event))
+            {
+                if history.get(&event.id) != Some(&event) {
                     return Err(WorldError::InvalidState(format!(
-                        "agent {} remembers an event absent from history",
-                        agent.id
-                    )));
-                }
-            }
-            for rumor in &agent.rumors {
-                if history.get(&rumor.event.id).copied() != Some(&rumor.event) {
-                    return Err(WorldError::InvalidState(format!(
-                        "agent {} heard a rumor absent from history",
+                        "agent {} knows an event absent from history",
                         agent.id
                     )));
                 }
@@ -649,18 +645,13 @@ impl World {
     }
 
     fn share_rumor(&mut self, speaker: AgentId, listener: AgentId) {
-        let known = self
-            .agents
-            .get(&listener)
-            .map(|agent| {
-                agent
-                    .memories
-                    .iter()
-                    .map(|event| event.id)
-                    .chain(agent.rumors.iter().map(|rumor| rumor.event.id))
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
+        let listener_state = &self.agents[&listener];
+        let known = listener_state
+            .memories
+            .iter()
+            .map(|event| event.id)
+            .chain(listener_state.rumors.iter().map(|rumor| rumor.event.id))
+            .collect::<BTreeSet<_>>();
         let Some((event, depth, base_confidence)) = self.agents.get(&speaker).and_then(|agent| {
             agent
                 .memories
@@ -943,9 +934,9 @@ impl World {
     }
 
     fn apply_mood_effects(&mut self, kind: &EventKind) {
-        let mut adjust = |id: AgentId, amount| {
+        let mut adjust = |id: AgentId, amount: f32| {
             if let Some(agent) = self.agents.get_mut(&id) {
-                agent.adjust_mood(amount);
+                agent.mood = (agent.mood + amount).clamp(-1.0, 1.0);
             }
         };
         match kind {
@@ -1034,7 +1025,7 @@ impl World {
                 if let Some((subject, sociability, reliability, hostility)) = evidence
                     && witness != subject
                 {
-                    agent.learn_about(subject, sociability, reliability, hostility);
+                    agent.learn_about_weighted(subject, sociability, reliability, hostility, 1.0);
                 }
             }
         }
@@ -1131,21 +1122,15 @@ impl World {
                     "agent {id} has too many memories"
                 )));
             }
-            let memory_ids = agent
+            let mut known_ids = agent
                 .memories
                 .iter()
                 .map(|event| event.id)
                 .collect::<BTreeSet<_>>();
-            let rumor_ids = agent
-                .rumors
-                .iter()
-                .map(|rumor| rumor.event.id)
-                .collect::<BTreeSet<_>>();
             if agent.rumors.len() > RUMOR_LIMIT
-                || rumor_ids.len() != agent.rumors.len()
-                || !memory_ids.is_disjoint(&rumor_ids)
                 || agent.rumors.iter().any(|rumor| {
-                    rumor.source == *id
+                    !known_ids.insert(rumor.event.id)
+                        || rumor.source == *id
                         || !self.agents.contains_key(&rumor.source)
                         || rumor.depth == 0
                         || !(0.0..=1.0).contains(&rumor.confidence)

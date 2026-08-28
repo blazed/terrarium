@@ -12,8 +12,6 @@ pub enum DecisionError {
     Json(#[from] serde_json::Error),
     #[error("decision-engine response contained no action output")]
     MissingChoice,
-    #[error("decision engine proposed an action outside the current affordances")]
-    UnavailableAction,
     #[error("decision engine unavailable: {0}")]
     Unavailable(String),
 }

@@ -1,10 +1,8 @@
 use super::{DecisionEngine, DecisionError};
-use crate::{
-    cognition::AgentObservation,
-    sim::{ObservationTarget, ProposedAction},
-};
+use crate::{cognition::AgentObservation, sim::ProposedAction};
 use reqwest::{Client, Url};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 use std::{net::IpAddr, time::Duration};
 
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
@@ -12,7 +10,7 @@ The observation is subjective and complete: do not invent people, places, posses
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
-The observation gives local_time, work_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
+The observation gives local_time, workplace opening_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
 For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
@@ -134,7 +132,10 @@ impl OpenAiDecisionEngine {
         }
 
         Ok(Self {
-            client: Client::builder().timeout(timeout).build()?,
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(timeout)
+                .build()?,
             endpoint,
             model,
             api_key: None,
@@ -223,23 +224,12 @@ impl DecisionEngine for OpenAiDecisionEngine {
                         },
                     ],
                     temperature: self.temperature,
+                    stream: true,
                     reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
                     max_completion_tokens: self.max_completion_tokens,
                     provider,
                 };
-                request_builder
-                    .json(&request)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<ChatResponse>()
-                    .await?
-                    .choices
-                    .into_iter()
-                    .next()
-                    .ok_or(DecisionError::MissingChoice)?
-                    .message
-                    .content
+                response_content(request_builder.json(&request).send().await?, self.api).await?
             }
             OpenAiApi::Responses => {
                 let request = ResponsesRequest {
@@ -247,56 +237,68 @@ impl DecisionEngine for OpenAiDecisionEngine {
                     instructions: SYSTEM_PROMPT,
                     input,
                     temperature: self.temperature,
+                    stream: true,
                     reasoning: self.reasoning_effort.map(|effort| Reasoning { effort }),
                     max_output_tokens: self.max_completion_tokens,
                     provider,
                 };
-                request_builder
-                    .json(&request)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<ResponsesResponse>()
-                    .await?
-                    .output
-                    .into_iter()
-                    .flat_map(|item| item.content)
-                    .find_map(|content| {
-                        (content.kind == "output_text")
-                            .then_some(content.text)
-                            .flatten()
-                    })
-                    .ok_or(DecisionError::MissingChoice)?
+                response_content(request_builder.json(&request).send().await?, self.api).await?
             }
         };
-        let action = serde_json::from_str(content.trim())?;
-        if !action_is_afforded(observation, &action) {
-            return Err(DecisionError::UnavailableAction);
-        }
-        Ok(action)
+        Ok(serde_json::from_str(content.trim())?)
     }
 }
 
-fn action_is_afforded(observation: &AgentObservation, action: &ProposedAction) -> bool {
-    let affordances = &observation.action_affordances;
-    match action {
-        ProposedAction::Move { destination } => affordances.move_to.contains(destination),
-        ProposedAction::Talk { target, .. } => affordances.talk_to.contains(target),
-        ProposedAction::Confront { target, claim } => affordances
-            .confront
-            .iter()
-            .any(|affordance| affordance.target == *target && affordance.claim == *claim),
-        ProposedAction::Observe {
-            target: ObservationTarget::Agent(target),
-        } => affordances.talk_to.contains(target),
-        ProposedAction::Observe {
-            target: ObservationTarget::Location(target),
-        } => *target == observation.current_location.id,
-        ProposedAction::Eat => affordances.can_eat,
-        ProposedAction::Rest => affordances.can_rest,
-        ProposedAction::Work => affordances.can_work,
-        ProposedAction::Wait => true,
+async fn response_content(
+    response: reqwest::Response,
+    api: OpenAiApi,
+) -> Result<String, DecisionError> {
+    let body = response.error_for_status()?.text().await?;
+    if body.lines().any(|line| line.starts_with("data:")) {
+        return parse_stream(&body, api);
     }
+
+    let response: Value = serde_json::from_str(&body)?;
+    let content = match api {
+        OpenAiApi::ChatCompletions => response.pointer("/choices/0/message/content"),
+        OpenAiApi::Responses => response["output"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|output| output["content"].as_array().into_iter().flatten())
+            .find(|content| content["type"] == "output_text")
+            .map(|content| &content["text"]),
+    };
+    content
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(DecisionError::MissingChoice)
+}
+
+fn parse_stream(body: &str, api: OpenAiApi) -> Result<String, DecisionError> {
+    let mut output = String::new();
+    for data in body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim))
+        .filter(|data| !data.is_empty() && *data != "[DONE]")
+    {
+        let event: Value = serde_json::from_str(data)?;
+        let delta = match api {
+            OpenAiApi::ChatCompletions => event
+                .pointer("/choices/0/delta/content")
+                .or_else(|| event.pointer("/choices/0/message/content"))
+                .and_then(Value::as_str),
+            OpenAiApi::Responses => (event["type"] == "response.output_text.delta")
+                .then(|| event["delta"].as_str())
+                .flatten(),
+        };
+        if let Some(delta) = delta {
+            output.push_str(delta);
+        }
+    }
+    (!output.is_empty())
+        .then_some(output)
+        .ok_or(DecisionError::MissingChoice)
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -313,6 +315,7 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: [ChatMessage; 2],
     temperature: f32,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Reasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,6 +330,7 @@ struct ResponsesRequest<'a> {
     instructions: &'static str,
     input: String,
     temperature: f32,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Reasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,50 +356,13 @@ struct ChatMessage {
     content: String,
 }
 
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct ResponsesResponse {
-    output: Vec<ResponseOutput>,
-}
-
-#[derive(Deserialize)]
-struct ResponseOutput {
-    #[serde(default)]
-    content: Vec<ResponseContent>,
-}
-
-#[derive(Deserialize)]
-struct ResponseContent {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Deserialize)]
-struct ResponseMessage {
-    content: String,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        ChatMessage, ChatRequest, OpenAiApi, OpenAiDecisionEngine, ReasoningEffort,
-        action_is_afforded,
-    };
+    use super::{ChatMessage, ChatRequest, OpenAiApi, OpenAiDecisionEngine, ReasoningEffort};
     use crate::{
-        cognition::{ConfrontationAffordance, perceive},
+        cognition::perceive,
         decision::{DecisionEngine, DecisionError},
-        sim::{ActionResult, EventId, ProposedAction, World},
+        sim::{ActionResult, ProposedAction, World},
     };
     use std::{
         io::{Read, Write},
@@ -403,39 +370,6 @@ mod tests {
         thread,
         time::Duration,
     };
-    use uuid::Uuid;
-
-    #[test]
-    fn unavailable_actions_are_rejected_before_execution() {
-        let world = World::briar_glen(42).expect("town");
-        let actor = *world.agents.keys().next().expect("resident");
-        let mut observation = perceive(&world, actor).expect("observation");
-        let confrontation = ConfrontationAffordance {
-            target: observation.visible_agents[0].id,
-            claim: EventId(Uuid::nil()),
-        };
-        observation.action_affordances.confront.push(confrontation);
-
-        assert!(action_is_afforded(&observation, &ProposedAction::Wait));
-        assert!(action_is_afforded(
-            &observation,
-            &ProposedAction::Confront {
-                target: confrontation.target,
-                claim: confrontation.claim,
-            }
-        ));
-        assert_eq!(
-            action_is_afforded(&observation, &ProposedAction::Work),
-            observation.action_affordances.can_work
-        );
-        assert!(!action_is_afforded(
-            &observation,
-            &ProposedAction::Move {
-                destination: observation.current_location.id,
-            }
-        ));
-    }
-
     #[tokio::test]
     async fn local_response_executes_through_the_world() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -460,15 +394,13 @@ mod tests {
             assert!(request.contains("Move only to a move_to ID"));
             assert!(request.contains("when its can_* value is true"));
             assert!(request.contains(r#"\"local_time\":{\"day\":1,\"hour\":7,\"minute\":0}"#));
-            assert!(
-                request.contains(r#"\"work_hours\":{\"opens_at_hour\":6,\"closes_at_hour\":14}"#)
-            );
             assert!(request.contains(r#"\"opening_hours\":"#));
             assert!(request.contains(r#"\"is_open\":"#));
             assert!(request.contains(r#"\"action_affordances\":{\"move_to\":["#));
             assert!(request.contains(r#"\"route_hints\":"#));
             assert!(request.contains(r#"\"can_work\":false"#));
             assert!(request.contains(r#""temperature":0.7"#));
+            assert!(request.contains(r#""stream":true"#));
             assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
             assert!(request.contains(r#""max_completion_tokens":512"#));
             assert!(
@@ -529,10 +461,11 @@ mod tests {
             assert!(request.contains(r#""input":"{\"tick\""#));
             assert!(request.contains(r#""max_output_tokens":256"#));
             assert!(!request.contains("max_completion_tokens"));
-            let body = r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"{\"action\":\"eat\"}"}]}]}"#;
+            assert!(request.contains(r#""stream":true"#));
+            let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"action\\\":\\\"eat\\\"}\"}\n\ndata: [DONE]\n\n";
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -559,6 +492,77 @@ mod tests {
         server.join().expect("server");
     }
 
+    #[tokio::test]
+    async fn active_streams_can_outlive_the_inactivity_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            read_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .expect("headers");
+            for delta in ["{\"action\":", "\"eat\"", "}"] {
+                let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
+                write!(stream, "data: {event}\n\n").expect("event");
+                stream.flush().expect("flush");
+                thread::sleep(Duration::from_millis(100));
+            }
+            write!(stream, "data: [DONE]\n\n").expect("done");
+        });
+
+        let world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let observation = perceive(&world, actor).expect("observation");
+        let mut engine = OpenAiDecisionEngine::new(
+            &format!("http://{address}/v1"),
+            "test-model",
+            Duration::from_millis(200),
+        )
+        .expect("engine");
+
+        assert_eq!(
+            engine.decide(&observation).await.expect("action"),
+            ProposedAction::Eat
+        );
+        server.join().expect("server");
+    }
+
+    #[tokio::test]
+    async fn inactive_streams_time_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            read_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .expect("headers");
+            stream.flush().expect("flush");
+            thread::sleep(Duration::from_millis(120));
+        });
+
+        let world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let observation = perceive(&world, actor).expect("observation");
+        let mut engine = OpenAiDecisionEngine::new(
+            &format!("http://{address}/v1"),
+            "test-model",
+            Duration::from_millis(50),
+        )
+        .expect("engine");
+
+        assert!(matches!(
+            engine.decide(&observation).await,
+            Err(DecisionError::Http(_))
+        ));
+        server.join().expect("server");
+    }
+
     #[test]
     fn optional_generation_fields_are_omitted_by_default() {
         let request = ChatRequest {
@@ -574,11 +578,13 @@ mod tests {
                 },
             ],
             temperature: 0.0,
+            stream: true,
             reasoning: None,
             max_completion_tokens: None,
             provider: None,
         };
         let json = serde_json::to_string(&request).expect("request JSON");
+        assert!(json.contains(r#""stream":true"#));
         assert!(!json.contains("reasoning"));
         assert!(!json.contains("max_completion_tokens"));
         assert!(!json.contains("provider"));

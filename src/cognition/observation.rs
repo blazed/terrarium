@@ -1,6 +1,7 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Event, EventId, EventKind, GoalKind, LocationId, Needs,
+    Activity, AgentId, Belief, Event, EventId, EventKind, Goal, LocationId, Needs,
     ObservationTarget, Occupation, OpeningHours, Personality, Relationship, Tick, World,
+    event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -15,7 +16,7 @@ pub struct AgentObservation {
     pub visible_agents: Vec<VisibleAgent>,
     pub action_affordances: ActionAffordances,
     pub route_hints: RouteHints,
-    pub goals: Vec<GoalStatus>,
+    pub goals: Vec<Goal>,
     pub relevant_memories: Vec<String>,
     pub rumors: Vec<RumorSummary>,
     pub beliefs: BTreeMap<AgentId, Belief>,
@@ -55,13 +56,6 @@ pub struct RouteHints {
     pub food: Option<LocationId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GoalStatus {
-    pub description: String,
-    pub kind: GoalKind,
-    pub progress: f32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalTime {
     pub day: u64,
@@ -77,7 +71,6 @@ pub struct SelfDescription {
     pub occupation: Occupation,
     pub home: LocationSummary,
     pub workplace: Option<LocationSummary>,
-    pub work_hours: Option<OpeningHours>,
     pub personality: Personality,
     pub needs: Needs,
     pub activity: Option<Activity>,
@@ -150,19 +143,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
     let connected = location
         .connected
         .iter()
-        .map(|id| {
-            let destination = world
-                .locations
-                .get(id)
-                .ok_or(ObservationError::UnknownLocation(*id))?;
-            Ok(LocationSummary {
-                id: *id,
-                name: destination.name.clone(),
-                serves_food: destination.serves_food,
-                opening_hours: destination.opening_hours,
-                is_open: destination.is_open(world.tick.hour()),
-            })
-        })
+        .map(|id| summarize_location(*id))
         .collect::<Result<Vec<_>, ObservationError>>()?;
     let visible_agents = location
         .agents
@@ -251,9 +232,6 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             age: agent.age,
             occupation: agent.occupation.clone(),
             home,
-            work_hours: workplace
-                .as_ref()
-                .and_then(|location| location.opening_hours),
             workplace,
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
@@ -271,15 +249,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         visible_agents,
         action_affordances,
         route_hints,
-        goals: agent
-            .goals
-            .iter()
-            .map(|goal| GoalStatus {
-                description: goal.description.clone(),
-                kind: goal.kind,
-                progress: goal.progress,
-            })
-            .collect(),
+        goals: agent.goals.clone(),
         relevant_memories: agent
             .memories
             .iter()
@@ -303,11 +273,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
 }
 
 fn rumor_subject(kind: &EventKind) -> Option<AgentId> {
-    match kind {
-        EventKind::Spoke { speaker, .. } => Some(*speaker),
-        EventKind::Worked { agent } => Some(*agent),
-        _ => None,
-    }
+    event_evidence(kind).map(|(subject, ..)| subject)
 }
 
 fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> Option<LocationId> {
@@ -501,7 +467,12 @@ mod tests {
         assert_eq!(observation.local_time.day, 1);
         assert_eq!(observation.local_time.hour, 7);
         assert_eq!(observation.local_time.minute, 0);
-        let work_hours = observation.self_description.work_hours.expect("work hours");
+        let work_hours = observation
+            .self_description
+            .workplace
+            .expect("workplace")
+            .opening_hours
+            .expect("work hours");
         assert_eq!(work_hours.opens_at_hour, 8);
         assert_eq!(work_hours.closes_at_hour, 18);
         assert_eq!(observation.goals.len(), 4);
