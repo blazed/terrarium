@@ -3,8 +3,8 @@ use super::{
     ConfrontationOutcome, DeathCause, DialogueTone, DiseaseState, Event, EventId, EventKind, Goal,
     GoalKind, GoalTarget, Intention, IntentionGoal, Inventory, Item, LifeState, Location,
     LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
-    Offering, OpeningHours, Personality, ProposedAction, Relationship, Rumor, STARTING_STOCK,
-    STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
+    Offering, OpeningHours, Personality, ProposedAction, Relationship, RoutingStats, Rumor,
+    STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -209,6 +209,7 @@ impl World {
                 disease: DiseaseState::Susceptible,
                 life: LifeState::Alive,
                 balance: 20,
+                routing: RoutingStats::default(),
                 inventory: Inventory::default(),
                 activity: None,
                 intention: None,
@@ -2262,6 +2263,17 @@ impl World {
             {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has non-normalized traits"
+                )));
+            }
+            if agent.routing.budget_day > self.tick.day()
+                || agent
+                    .routing
+                    .last_llm_attempt
+                    .is_some_and(|tick| tick > self.tick || tick.day() != agent.routing.budget_day)
+                || (agent.routing.llm_calls_today > 0 && agent.routing.last_llm_attempt.is_none())
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has invalid LLM routing state"
                 )));
             }
             if !agent.is_alive() && (agent.activity.is_some() || agent.intention.is_some()) {

@@ -1,4 +1,4 @@
-use super::{AgentId, Event, EventKind, Intention, LocationId, Relationship, Tick};
+use super::{AgentId, DecisionSource, Event, EventKind, Intention, LocationId, Relationship, Tick};
 
 pub const MAX_ITEMS_PER_KIND: u8 = 3;
 
@@ -344,6 +344,49 @@ impl Activity {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingStats {
+    pub budget_day: u64,
+    pub llm_calls_today: u8,
+    pub last_llm_attempt: Option<Tick>,
+    pub local_decisions: u64,
+    pub llm_decisions: u64,
+    pub llm_fallbacks: u64,
+}
+
+impl RoutingStats {
+    pub fn llm_calls_on(&self, day: u64) -> u8 {
+        if self.budget_day == day {
+            self.llm_calls_today
+        } else {
+            0
+        }
+    }
+
+    pub fn record(&mut self, tick: Tick, source: DecisionSource) {
+        match source {
+            DecisionSource::Local => {
+                self.local_decisions = self.local_decisions.saturating_add(1);
+            }
+            DecisionSource::Llm | DecisionSource::LlmFallback => {
+                let day = tick.day();
+                if self.budget_day != day {
+                    self.budget_day = day;
+                    self.llm_calls_today = 0;
+                }
+                self.llm_calls_today = self.llm_calls_today.saturating_add(1);
+                self.last_llm_attempt = Some(tick);
+                if source == DecisionSource::Llm {
+                    self.llm_decisions = self.llm_decisions.saturating_add(1);
+                } else {
+                    self.local_decisions = self.local_decisions.saturating_add(1);
+                    self.llm_fallbacks = self.llm_fallbacks.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: AgentId,
@@ -360,6 +403,7 @@ pub struct Agent {
     pub disease: DiseaseState,
     pub life: LifeState,
     pub balance: u64,
+    pub routing: RoutingStats,
     #[serde(default)]
     pub inventory: Inventory,
     #[serde(default)]

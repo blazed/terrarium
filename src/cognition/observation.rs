@@ -1,7 +1,8 @@
 use crate::sim::{
     Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, HealthCondition,
     Intention, Inventory, LifeState, LocationId, Needs, ObservationTarget, Occupation, Offering,
-    OpeningHours, Personality, Relationship, Tick, TownEventKind, World, event_evidence,
+    OpeningHours, Personality, Relationship, RoutingStats, Tick, TownEventKind, World,
+    event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,6 +96,8 @@ pub struct SelfDescription {
     pub needs: Needs,
     pub balance: u64,
     pub inventory: Inventory,
+    #[serde(skip)]
+    pub routing: RoutingStats,
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub mood: f32,
@@ -351,6 +354,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             needs: agent.needs.clone(),
             balance: agent.balance,
             inventory: agent.inventory,
+            routing: agent.routing,
             activity: agent.activity,
             intention: agent.intention.clone(),
             mood: agent.mood,

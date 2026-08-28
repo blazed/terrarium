@@ -8,13 +8,13 @@ mod town_event;
 mod world;
 
 pub use action::{
-    ActionRejection, ActionResult, DialogueTone, Intention, IntentionGoal, MAX_TALK_MESSAGE_CHARS,
-    ObservationTarget, ProposedAction,
+    ActionRejection, ActionResult, Decision, DecisionSource, DialogueTone, Intention,
+    IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
 };
 pub use agent::{
     Activity, ActivityKind, Agent, Belief, DeathCause, DiseaseState, Goal, GoalKind, GoalTarget,
     HealthCondition, Inventory, Item, LifeState, MAX_ITEMS_PER_KIND, Needs, Occupation,
-    Personality, Rumor,
+    Personality, RoutingStats, Rumor,
 };
 pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Business, Location, Offering, OpeningHours};

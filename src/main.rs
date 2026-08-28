@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 use terrarium::{
-    decision::{OpenAiApi, OpenAiDecisionEngine, RandomDecisionEngine, ReasoningEffort},
+    decision::{
+        DEFAULT_LLM_CALLS_PER_DAY, HybridDecisionEngine, OpenAiApi, OpenAiDecisionEngine,
+        RandomDecisionEngine, ReasoningEffort,
+    },
     observer::{render_dashboard, render_event, render_run_since, render_summary},
     persistence::{load_world, save_world},
     runner::{run_simulation, run_simulation_with_events},
@@ -35,6 +38,7 @@ enum DecisionArgs {
         reasoning_effort: Option<ReasoningEffort>,
         max_completion_tokens: Option<u32>,
         provider: Option<String>,
+        calls_per_day: u8,
     },
 }
 
@@ -47,7 +51,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -100,6 +104,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut llm_reasoning_effort = None;
     let mut llm_max_completion_tokens = None;
     let mut llm_provider = None;
+    let mut llm_calls_per_day = None;
     let mut live = false;
     while let Some(flag) = args.next() {
         if flag == "--live" {
@@ -164,6 +169,16 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
                 }
                 llm_provider = Some(value.trim().into());
             }
+            "--llm-calls-per-day" => {
+                let calls = value.parse::<u8>().map_err(|_| CliError::InvalidLlmValue {
+                    flag: flag.clone(),
+                    value: value.clone(),
+                })?;
+                if calls == 0 {
+                    return Err(CliError::InvalidLlmValue { flag, value });
+                }
+                llm_calls_per_day = Some(calls);
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -195,6 +210,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             reasoning_effort: llm_reasoning_effort,
             max_completion_tokens: llm_max_completion_tokens,
             provider: llm_provider,
+            calls_per_day: llm_calls_per_day.unwrap_or(DEFAULT_LLM_CALLS_PER_DAY),
         },
         None if llm_url.is_some()
             || llm_api_key_env.is_some()
@@ -202,7 +218,8 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             || llm_temperature.is_some()
             || llm_reasoning_effort.is_some()
             || llm_max_completion_tokens.is_some()
-            || llm_provider.is_some() =>
+            || llm_provider.is_some()
+            || llm_calls_per_day.is_some() =>
         {
             return Err(CliError::MissingLlmModel);
         }
@@ -317,8 +334,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     reasoning_effort,
                     max_completion_tokens,
                     provider,
+                    calls_per_day,
                 } => {
-                    let mut engine = OpenAiDecisionEngine::new_with_api(
+                    let mut llm = OpenAiDecisionEngine::new_with_api(
                         &base_url,
                         model,
                         Duration::from_secs(120),
@@ -326,21 +344,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     )?
                     .with_temperature(temperature)?;
                     if let Some(effort) = reasoning_effort {
-                        engine = engine.with_reasoning_effort(effort);
+                        llm = llm.with_reasoning_effort(effort);
                     }
                     if let Some(tokens) = max_completion_tokens {
-                        engine = engine.with_max_completion_tokens(tokens)?;
+                        llm = llm.with_max_completion_tokens(tokens)?;
                     }
                     if let Some(provider) = provider {
-                        engine = engine.with_provider(provider)?;
+                        llm = llm.with_provider(provider)?;
                     }
                     if let Some(name) = api_key_env {
                         let key = std::env::var(&name)
                             .map_err(|_| CliError::MissingApiKey(name.clone()))?;
-                        engine = engine
+                        llm = llm
                             .with_api_key(key)
                             .map_err(|_| CliError::MissingApiKey(name))?;
                     }
+                    let mut engine = HybridDecisionEngine::new(
+                        RandomDecisionEngine::new(world_seed),
+                        llm,
+                        calls_per_day,
+                    )?;
                     if live {
                         (run_live(world, ticks, &mut engine).await?, false)
                     } else {
@@ -436,6 +459,8 @@ mod tests {
                 "512",
                 "--llm-provider",
                 "Anthropic",
+                "--llm-calls-per-day",
+                "4",
             ])),
             Ok(Command::Run(RunArgs {
                 seed: 814_921,
@@ -452,6 +477,7 @@ mod tests {
                     reasoning_effort: Some(ReasoningEffort::High),
                     max_completion_tokens: Some(512),
                     provider: Some("Anthropic".into()),
+                    calls_per_day: 4,
                 },
             }))
         );
@@ -558,6 +584,19 @@ mod tests {
             Err(CliError::InvalidLlmValue {
                 flag: "--llm-provider".into(),
                 value: "".into(),
+            })
+        );
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--llm-model",
+                "model",
+                "--llm-calls-per-day",
+                "0"
+            ])),
+            Err(CliError::InvalidLlmValue {
+                flag: "--llm-calls-per-day".into(),
+                value: "0".into(),
             })
         );
     }

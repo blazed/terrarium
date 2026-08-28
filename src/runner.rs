@@ -1,7 +1,7 @@
 use crate::{
     cognition::{ObservationError, perceive},
     decision::DecisionEngine,
-    sim::{Event, ProposedAction, Scheduler, World, WorldError},
+    sim::{Decision, Event, ProposedAction, Scheduler, World, WorldError},
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -42,15 +42,21 @@ pub async fn run_simulation_with_events(
             let previous_events = world.events().len();
             if world.continue_intention(agent).is_none() {
                 let observation = perceive(&world, agent)?;
-                let action = match engine.decide(&observation).await {
-                    Ok(action) => action,
+                let decision = match engine.decide(&observation).await {
+                    Ok(decision) => decision,
                     Err(error) => {
                         warn!(?agent, %error, "decision failed; waiting instead");
-                        ProposedAction::Wait
+                        Decision::local(ProposedAction::Wait)
                     }
                 };
-                debug!(?agent, ?action, "executing proposed action");
-                world.execute(agent, action);
+                world
+                    .agents
+                    .get_mut(&agent)
+                    .expect("scheduled resident")
+                    .routing
+                    .record(world.tick, decision.source);
+                debug!(?agent, ?decision.action, "executing proposed action");
+                world.execute(agent, decision.action);
             }
             world.validate()?;
             for event in &world.events()[previous_events..] {
@@ -68,7 +74,8 @@ mod tests {
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
         sim::{
-            DeathCause, EventKind, Intention, IntentionGoal, LifeState, ProposedAction, Tick, World,
+            DeathCause, Decision, EventKind, Intention, IntentionGoal, LifeState, ProposedAction,
+            Tick, World,
         },
     };
 
@@ -181,9 +188,9 @@ mod tests {
         async fn decide(
             &mut self,
             _observation: &AgentObservation,
-        ) -> Result<ProposedAction, DecisionError> {
+        ) -> Result<Decision, DecisionError> {
             self.0 += 1;
-            Ok(ProposedAction::Wait)
+            Ok(Decision::local(ProposedAction::Wait))
         }
     }
 
@@ -231,7 +238,7 @@ mod tests {
         async fn decide(
             &mut self,
             _observation: &AgentObservation,
-        ) -> Result<ProposedAction, DecisionError> {
+        ) -> Result<Decision, DecisionError> {
             Err(DecisionError::Unavailable("test failure".into()))
         }
     }
