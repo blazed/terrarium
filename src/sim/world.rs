@@ -1,10 +1,10 @@
 use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, BUSINESS_STARTING_CASH, Business,
     ConfrontationOutcome, DialogueTone, Event, EventId, EventKind, Goal, GoalKind, GoalTarget,
-    Intention, IntentionGoal, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR,
-    Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, ProposedAction,
-    Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind,
-    WORK_WAGE, seeded_uuid,
+    Intention, IntentionGoal, Inventory, Item, Location, LocationId, MAX_TALK_MESSAGE_CHARS,
+    NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation, Offering, OpeningHours,
+    Personality, ProposedAction, Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick,
+    TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -190,6 +190,7 @@ impl World {
                     energy: vary_need(0.8),
                 },
                 balance: 20,
+                inventory: Inventory::default(),
                 activity: None,
                 intention: None,
                 mood: 0.0,
@@ -711,6 +712,11 @@ impl World {
                         },
                     );
                 }
+                if let Some(item) = business.offering.item()
+                    && !agent.inventory.has_capacity(item)
+                {
+                    return self.reject(actor, Some(current), ActionRejection::InventoryFull(item));
+                }
                 if business.revenue.checked_add(business.price).is_none()
                     || business.cash.checked_add(business.price).is_none()
                 {
@@ -720,6 +726,45 @@ impl World {
                     agent: actor,
                     offering: business.offering,
                     cost: business.price,
+                }
+            }
+            ProposedAction::ConsumeMeal => {
+                if agent.inventory.meals == 0 {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemUnavailable(Item::Meal),
+                    );
+                }
+                EventKind::ItemUsed {
+                    agent: actor,
+                    item: Item::Meal,
+                }
+            }
+            ProposedAction::UseSupplies => {
+                if agent.inventory.supplies == 0 {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemUnavailable(Item::Supplies),
+                    );
+                }
+                EventKind::ItemUsed {
+                    agent: actor,
+                    item: Item::Supplies,
+                }
+            }
+            ProposedAction::UseRepairKit => {
+                if agent.inventory.repair_kits == 0 {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemUnavailable(Item::RepairKit),
+                    );
+                }
+                EventKind::ItemUsed {
+                    agent: actor,
+                    item: Item::RepairKit,
                 }
             }
             ProposedAction::Rest => {
@@ -1421,17 +1466,11 @@ impl World {
             EventKind::Purchased { offering, cost, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     agent.balance -= *cost;
-                    match offering {
-                        Offering::Meal => {
-                            Needs::restore(&mut agent.needs.food, 0.25);
-                            Needs::restore(&mut agent.needs.energy, 0.01);
-                        }
-                        Offering::Supplies => Needs::restore(&mut agent.needs.safety, 0.15),
-                        Offering::Repairs => Needs::restore(&mut agent.needs.safety, 0.25),
-                        Offering::CivicServices => {
-                            Needs::restore(&mut agent.needs.status, 0.15);
-                            Needs::restore(&mut agent.needs.companionship, 0.03);
-                        }
+                    if let Some(item) = offering.item() {
+                        agent.inventory.add(item);
+                    } else {
+                        Needs::restore(&mut agent.needs.status, 0.15);
+                        Needs::restore(&mut agent.needs.companionship, 0.03);
                     }
                 }
                 let business = self
@@ -1442,6 +1481,19 @@ impl World {
                 business.cash += *cost;
                 business.stock -= 1;
                 business.revenue += *cost;
+            }
+            EventKind::ItemUsed { item, .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    agent.inventory.remove(*item);
+                    match item {
+                        Item::Meal => {
+                            Needs::restore(&mut agent.needs.food, 0.35);
+                            Needs::restore(&mut agent.needs.energy, 0.02);
+                        }
+                        Item::Supplies => Needs::restore(&mut agent.needs.safety, 0.2),
+                        Item::RepairKit => Needs::restore(&mut agent.needs.safety, 0.35),
+                    }
+                }
             }
             EventKind::Rested { .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
@@ -1561,6 +1613,7 @@ impl World {
                 adjust(*listener, listener_change);
             }
             EventKind::Purchased { agent, .. } => adjust(*agent, 0.06),
+            EventKind::ItemUsed { agent, .. } => adjust(*agent, 0.04),
             EventKind::Rested { agent } => adjust(*agent, 0.08),
             EventKind::Worked { agent, .. } => adjust(*agent, 0.03),
             EventKind::Confronted {
@@ -1613,6 +1666,7 @@ impl World {
                 }
             }
             EventKind::Purchased { agent, .. }
+            | EventKind::ItemUsed { agent, .. }
             | EventKind::Rested { agent }
             | EventKind::Worked { agent, .. }
             | EventKind::GoalCompleted { agent, .. } => {
@@ -1726,6 +1780,7 @@ impl World {
             }
             if !agent.personality.is_normalized()
                 || !agent.needs.is_normalized()
+                || !agent.inventory.is_valid()
                 || !(-1.0..=1.0).contains(&agent.mood)
             {
                 return Err(WorldError::InvalidState(format!(
@@ -1846,10 +1901,12 @@ mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
         DialogueTone, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention,
-        IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, ProposedAction,
+        IntentionGoal, Item, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, ProposedAction,
         Relationship, Tick, TownEvent, TownEventKind, World, WorldError,
     };
-    use crate::sim::{ActivityKind, BUSINESS_STARTING_CASH, STOCK_PER_SHIFT, WORK_WAGE};
+    use crate::sim::{
+        ActivityKind, BUSINESS_STARTING_CASH, MAX_ITEMS_PER_KIND, STOCK_PER_SHIFT, WORK_WAGE,
+    };
     use std::collections::BTreeSet;
     use uuid::Uuid;
 
@@ -2103,7 +2160,11 @@ mod tests {
 
         let needs = world.agents[&actor].needs.clone();
         world.execute(actor, ProposedAction::Purchase);
+        assert_eq!(world.agents[&actor].needs, needs);
+        assert_eq!(world.agents[&actor].inventory.meals, 1);
+        world.execute(actor, ProposedAction::ConsumeMeal);
         assert!(world.agents[&actor].needs.food > needs.food);
+        assert_eq!(world.agents[&actor].inventory.meals, 0);
         let energy = world.agents[&actor].needs.energy;
         let safety = world.agents[&actor].needs.safety;
         let home = world.agents[&actor].home;
@@ -2113,6 +2174,9 @@ mod tests {
         assert!(world.agents[&actor].needs.safety > safety);
         assert!(world.agents[&listener].memories.iter().any(
             |event| matches!(event.kind, EventKind::Purchased { agent, .. } if agent == actor)
+        ));
+        assert!(world.agents[&listener].memories.iter().any(
+            |event| matches!(event.kind, EventKind::ItemUsed { agent, item: Item::Meal } if agent == actor)
         ));
         world.validate().expect("normalized needs");
     }
@@ -2229,6 +2293,61 @@ mod tests {
     }
 
     #[test]
+    fn inventory_capacity_and_missing_items_reject_atomically() {
+        let mut world = World::briar_glen(22).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let meal_business = world
+            .locations
+            .values()
+            .find(|location| {
+                location
+                    .business
+                    .is_some_and(|business| business.offering == Offering::Meal)
+                    && location.is_open(world.tick.hour())
+            })
+            .expect("open meal business")
+            .id;
+        world.relocate(actor, meal_business);
+
+        assert_eq!(
+            world.execute(actor, ProposedAction::ConsumeMeal),
+            ActionResult::Rejected(ActionRejection::ItemUnavailable(Item::Meal))
+        );
+        assert_eq!(
+            world.execute(actor, ProposedAction::UseSupplies),
+            ActionResult::Rejected(ActionRejection::ItemUnavailable(Item::Supplies))
+        );
+        assert_eq!(
+            world.execute(actor, ProposedAction::UseRepairKit),
+            ActionResult::Rejected(ActionRejection::ItemUnavailable(Item::RepairKit))
+        );
+
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .inventory
+            .meals = MAX_ITEMS_PER_KIND;
+        let before_agent = world.agents[&actor].clone();
+        let before_location = world.locations[&meal_business].clone();
+        assert_eq!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Rejected(ActionRejection::InventoryFull(Item::Meal))
+        );
+        assert_eq!(world.agents[&actor].balance, before_agent.balance);
+        assert_eq!(world.agents[&actor].inventory, before_agent.inventory);
+        assert_eq!(world.locations[&meal_business], before_location);
+
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .inventory
+            .meals = MAX_ITEMS_PER_KIND + 1;
+        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+    }
+
+    #[test]
     fn every_market_offering_transfers_value_and_work_restocks_it() {
         for offering in [
             Offering::Meal,
@@ -2280,9 +2399,20 @@ mod tests {
             assert_eq!(after_purchase.revenue, before.revenue + before.price);
             assert_eq!(after_purchase.stock, before.stock - 1);
             match offering {
-                Offering::Meal => assert!(world.agents[&actor].needs.food > before_needs.food),
-                Offering::Supplies | Offering::Repairs => {
-                    assert!(world.agents[&actor].needs.safety > before_needs.safety)
+                Offering::Meal => {
+                    assert_eq!(world.agents[&actor].inventory.meals, 1);
+                    world.execute(actor, ProposedAction::ConsumeMeal);
+                    assert!(world.agents[&actor].needs.food > before_needs.food);
+                }
+                Offering::Supplies => {
+                    assert_eq!(world.agents[&actor].inventory.supplies, 1);
+                    world.execute(actor, ProposedAction::UseSupplies);
+                    assert!(world.agents[&actor].needs.safety > before_needs.safety);
+                }
+                Offering::Repairs => {
+                    assert_eq!(world.agents[&actor].inventory.repair_kits, 1);
+                    world.execute(actor, ProposedAction::UseRepairKit);
+                    assert!(world.agents[&actor].needs.safety > before_needs.safety);
                 }
                 Offering::CivicServices => {
                     assert!(world.agents[&actor].needs.status > before_needs.status);

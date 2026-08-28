@@ -1,7 +1,7 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, Intention, LocationId,
-    Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, Relationship, Tick,
-    TownEventKind, World, event_evidence,
+    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, Intention, Inventory,
+    LocationId, Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality,
+    Relationship, Tick, TownEventKind, World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +52,9 @@ pub struct ActionAffordances {
     pub talk_to: Vec<AgentId>,
     pub confront: Vec<ConfrontationAffordance>,
     pub can_purchase: bool,
+    pub can_consume_meal: bool,
+    pub can_use_supplies: bool,
+    pub can_use_repair_kit: bool,
     pub can_rest: bool,
     pub can_work: bool,
 }
@@ -88,6 +91,7 @@ pub struct SelfDescription {
     pub personality: Personality,
     pub needs: Needs,
     pub balance: u64,
+    pub inventory: Inventory,
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub mood: f32,
@@ -214,13 +218,35 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             world.is_location_open(location.id)
                 && business.stock > 0
                 && agent.balance >= business.price
+                && business
+                    .offering
+                    .item()
+                    .is_none_or(|item| agent.inventory.has_capacity(item))
         }),
+        can_consume_meal: agent.inventory.meals > 0,
+        can_use_supplies: agent.inventory.supplies > 0,
+        can_use_repair_kit: agent.inventory.repair_kits > 0,
         can_rest: location.id == agent.home,
         can_work: agent.workplace == Some(location.id)
             && world.is_location_open(location.id)
             && location.business.is_some_and(Business::solvent),
     };
-    let desired_offering = Offering::desired(&agent.needs);
+    let desired_offering = Offering::desired(&agent.needs).or_else(|| {
+        if world
+            .active_town_event
+            .is_some_and(|event| event.kind == TownEventKind::Shortage)
+        {
+            None
+        } else if agent.inventory.meals < 2 {
+            Some(Offering::Meal)
+        } else if agent.inventory.supplies == 0 {
+            Some(Offering::Supplies)
+        } else if agent.inventory.repair_kits == 0 {
+            Some(Offering::Repairs)
+        } else {
+            None
+        }
+    });
     let route_hints = RouteHints {
         home: next_hop(world, location.id, BTreeSet::from([agent.home])),
         workplace: agent.workplace.and_then(|workplace| {
@@ -241,6 +267,10 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                             && world.is_location_open(candidate.id)
                             && business.stock > 0
                             && agent.balance >= business.price
+                            && business
+                                .offering
+                                .item()
+                                .is_none_or(|item| agent.inventory.has_capacity(item))
                     })
                 })
                 .map(|candidate| candidate.id)
@@ -269,6 +299,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
             balance: agent.balance,
+            inventory: agent.inventory,
             activity: agent.activity,
             intention: agent.intention.clone(),
             mood: agent.mood,
@@ -431,6 +462,12 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             offering,
             cost,
         } => format!("{} bought {offering} for {cost} coins.", agent_name(*agent)),
+        EventKind::ItemUsed { agent, item } if *agent == observer => {
+            format!("You used a {item}.")
+        }
+        EventKind::ItemUsed { agent, item } => {
+            format!("{} used a {item}.", agent_name(*agent))
+        }
         EventKind::Rested { agent } if *agent == observer => "You rested.".into(),
         EventKind::Rested { agent } => format!("{} rested.", agent_name(*agent)),
         EventKind::Worked {
@@ -655,6 +692,28 @@ mod tests {
                 .get("intention")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn observation_exposes_only_the_actors_inventory_and_item_affordances() {
+        let mut world = World::briar_glen(19).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let inventory = &mut world.agents.get_mut(&actor).expect("resident").inventory;
+        inventory.meals = 1;
+        inventory.repair_kits = 1;
+        let expected = *inventory;
+
+        let observation = perceive(&world, actor).expect("observation");
+        assert_eq!(observation.self_description.inventory, expected);
+        assert!(observation.action_affordances.can_consume_meal);
+        assert!(!observation.action_affordances.can_use_supplies);
+        assert!(observation.action_affordances.can_use_repair_kit);
+        assert!(observation.visible_agents.iter().all(|agent| {
+            serde_json::to_value(agent)
+                .expect("visible agent")
+                .get("inventory")
+                .is_none()
+        }));
     }
 
     #[test]

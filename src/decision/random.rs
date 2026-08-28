@@ -70,6 +70,12 @@ impl DecisionEngine for RandomDecisionEngine {
             .as_ref()
             .is_some_and(|event| event.kind == TownEventKind::Storm)
         {
+            if needs.safety < 0.3 && observation.action_affordances.can_use_repair_kit {
+                return Ok(ProposedAction::UseRepairKit);
+            }
+            if needs.safety < 0.6 && observation.action_affordances.can_use_supplies {
+                return Ok(ProposedAction::UseSupplies);
+            }
             return Ok(
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
@@ -81,6 +87,9 @@ impl DecisionEngine for RandomDecisionEngine {
 
         let desired_offering = Offering::desired(needs);
         if desired_offering == Some(Offering::Meal) {
+            if observation.action_affordances.can_consume_meal {
+                return Ok(ProposedAction::ConsumeMeal);
+            }
             return Ok(purchase_action(observation, Offering::Meal)
                 .or_else(|| work_action(observation))
                 .unwrap_or(ProposedAction::Wait));
@@ -98,6 +107,18 @@ impl DecisionEngine for RandomDecisionEngine {
             && let Some(companion) = preferred_companion()
         {
             return Ok(talk(observation, companion));
+        }
+        if desired_offering == Some(Offering::Repairs)
+            && observation.action_affordances.can_use_repair_kit
+        {
+            return Ok(ProposedAction::UseRepairKit);
+        }
+        if matches!(
+            desired_offering,
+            Some(Offering::Repairs | Offering::Supplies)
+        ) && observation.action_affordances.can_use_supplies
+        {
+            return Ok(ProposedAction::UseSupplies);
         }
         if let Some(offering @ (Offering::Repairs | Offering::Supplies)) = desired_offering
             && let Some(action) = purchase_action(observation, offering)
@@ -228,16 +249,24 @@ impl DecisionEngine for RandomDecisionEngine {
                     );
                 }
                 GoalTarget::Purchase { location } => {
-                    if observation.current_location.id == location
-                        && observation.action_affordances.can_purchase
-                    {
-                        return Ok(ProposedAction::Purchase);
+                    if observation.current_location.id == location {
+                        if observation.action_affordances.can_purchase {
+                            return Ok(ProposedAction::Purchase);
+                        }
+                        continue;
                     }
-                    return Ok(ProposedAction::Pursue {
-                        intention: IntentionGoal::Purchase {
-                            destination: location,
-                        },
-                    });
+                    if observation
+                        .route_hints
+                        .purchase
+                        .is_some_and(|route| route.destination == location)
+                    {
+                        return Ok(ProposedAction::Pursue {
+                            intention: IntentionGoal::Purchase {
+                                destination: location,
+                            },
+                        });
+                    }
+                    continue;
                 }
                 GoalTarget::Rest { home } => {
                     return Ok(
@@ -266,6 +295,28 @@ impl DecisionEngine for RandomDecisionEngine {
             } else {
                 follow_route(observation.route_hints.workplace, IntentionGoal::Work)
             });
+        }
+
+        if !observation
+            .town_event
+            .as_ref()
+            .is_some_and(|event| event.kind == TownEventKind::Shortage)
+        {
+            let inventory = observation.self_description.inventory;
+            let reserve = if inventory.meals < 2 {
+                Some(Offering::Meal)
+            } else if inventory.supplies == 0 {
+                Some(Offering::Supplies)
+            } else if inventory.repair_kits == 0 {
+                Some(Offering::Repairs)
+            } else {
+                None
+            };
+            if let Some(action) =
+                reserve.and_then(|offering| purchase_action(observation, offering))
+            {
+                return Ok(action);
+            }
         }
 
         let weights = [
@@ -446,7 +497,7 @@ fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> Di
 mod tests {
     use super::{DecisionEngine, RandomDecisionEngine};
     use crate::{
-        cognition::{ConfrontationAffordance, RumorSummary, perceive},
+        cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         sim::{
             Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Offering,
             ProposedAction, Relationship, Tick, World,
@@ -461,12 +512,23 @@ mod tests {
             .advance_to(Tick(8 * 60 / Tick::MINUTES))
             .expect("storm");
         let actor = *storm.agents.keys().next().expect("resident");
-        let observation = perceive(&storm, actor).expect("observation");
+        let mut observation = perceive(&storm, actor).expect("observation");
+        observation.self_description.inventory.repair_kits = 1;
+        observation.action_affordances.can_use_repair_kit = true;
         assert_eq!(
             RandomDecisionEngine::new(0)
                 .decide(&observation)
                 .await
-                .expect("storm decision"),
+                .expect("storm supplies"),
+            ProposedAction::UseRepairKit
+        );
+        observation.self_description.inventory.repair_kits = 0;
+        observation.action_affordances.can_use_repair_kit = false;
+        assert_eq!(
+            RandomDecisionEngine::new(0)
+                .decide(&observation)
+                .await
+                .expect("storm shelter"),
             ProposedAction::Rest
         );
 
@@ -519,6 +581,86 @@ mod tests {
             ProposedAction::Work
                 | ProposedAction::Pursue {
                     intention: IntentionGoal::Work
+                }
+        ));
+    }
+
+    #[tokio::test]
+    async fn inventory_is_used_for_urgent_needs_and_stocked_outside_shortages() {
+        let world = World::briar_glen(17).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.needs.food = 0.1;
+        observation.self_description.inventory.meals = 1;
+        observation.action_affordances.can_consume_meal = true;
+        assert_eq!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("meal"),
+            ProposedAction::ConsumeMeal
+        );
+
+        observation.self_description.needs.food = 1.0;
+        observation.self_description.needs.energy = 1.0;
+        observation.self_description.needs.companionship = 1.0;
+        observation.self_description.needs.safety = 0.1;
+        observation.self_description.inventory.repair_kits = 1;
+        observation.action_affordances.can_use_repair_kit = true;
+        assert_eq!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("repair"),
+            ProposedAction::UseRepairKit
+        );
+
+        observation.self_description.needs.safety = 0.3;
+        observation.self_description.inventory.repair_kits = 0;
+        observation.self_description.inventory.supplies = 1;
+        observation.action_affordances.can_use_repair_kit = false;
+        observation.action_affordances.can_use_supplies = true;
+        assert_eq!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("supplies"),
+            ProposedAction::UseSupplies
+        );
+
+        observation.self_description.needs = crate::sim::Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.self_description.inventory = Default::default();
+        observation.action_affordances.can_use_supplies = false;
+        observation.goals.clear();
+        assert!(matches!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("reserve"),
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Purchase { .. }
+            }
+        ));
+
+        observation.town_event = Some(TownEventObservation {
+            kind: crate::sim::TownEventKind::Shortage,
+            remaining_ticks: 10,
+        });
+        assert!(!matches!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("shortage"),
+            ProposedAction::Purchase
+                | ProposedAction::Pursue {
+                    intention: IntentionGoal::Purchase { .. }
                 }
         ));
     }

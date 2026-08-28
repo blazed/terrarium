@@ -1,4 +1,69 @@
 use super::{AgentId, Event, EventKind, Intention, LocationId, Relationship, Tick};
+
+pub const MAX_ITEMS_PER_KIND: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Item {
+    Meal,
+    Supplies,
+    RepairKit,
+}
+
+impl std::fmt::Display for Item {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Meal => "meal",
+            Self::Supplies => "supply pack",
+            Self::RepairKit => "repair kit",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inventory {
+    pub meals: u8,
+    pub supplies: u8,
+    pub repair_kits: u8,
+}
+
+impl Inventory {
+    pub fn count(self, item: Item) -> u8 {
+        match item {
+            Item::Meal => self.meals,
+            Item::Supplies => self.supplies,
+            Item::RepairKit => self.repair_kits,
+        }
+    }
+
+    pub fn has_capacity(self, item: Item) -> bool {
+        self.count(item) < MAX_ITEMS_PER_KIND
+    }
+
+    pub fn is_valid(self) -> bool {
+        [self.meals, self.supplies, self.repair_kits]
+            .into_iter()
+            .all(|count| count <= MAX_ITEMS_PER_KIND)
+    }
+
+    pub(super) fn add(&mut self, item: Item) {
+        let count = self.count_mut(item);
+        *count += 1;
+    }
+
+    pub(super) fn remove(&mut self, item: Item) {
+        let count = self.count_mut(item);
+        *count -= 1;
+    }
+
+    fn count_mut(&mut self, item: Item) -> &mut u8 {
+        match item {
+            Item::Meal => &mut self.meals,
+            Item::Supplies => &mut self.supplies,
+            Item::RepairKit => &mut self.repair_kits,
+        }
+    }
+}
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -175,6 +240,7 @@ pub enum ActivityKind {
     Conversing,
     Observing,
     Shopping,
+    UsingItem,
     Resting,
     Working,
     Waiting,
@@ -193,6 +259,7 @@ impl Activity {
             EventKind::Spoke { .. } | EventKind::Confronted { .. } => (ActivityKind::Conversing, 3),
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
             EventKind::Purchased { .. } => (ActivityKind::Shopping, 3),
+            EventKind::ItemUsed { .. } => (ActivityKind::UsingItem, 1),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
@@ -220,6 +287,8 @@ pub struct Agent {
     pub personality: Personality,
     pub needs: Needs,
     pub balance: u64,
+    #[serde(default)]
+    pub inventory: Inventory,
     #[serde(default)]
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
@@ -279,11 +348,13 @@ mod tests {
         let mut value = serde_json::to_value(world.agents.values().next().expect("resident"))
             .expect("agent JSON");
         let object = value.as_object_mut().expect("agent object");
+        object.remove("inventory");
         object.remove("activity");
         object.remove("mood");
         object.remove("beliefs");
         object.remove("rumors");
         let agent: Agent = serde_json::from_value(value).expect("legacy agent");
+        assert_eq!(agent.inventory, super::Inventory::default());
         assert_eq!(agent.activity, None);
         assert_eq!(agent.mood, 0.0);
         assert!(agent.beliefs.is_empty());

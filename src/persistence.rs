@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
-const CHECKPOINT_VERSION: i64 = 7;
+const CHECKPOINT_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
@@ -59,7 +59,7 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA user_version = 7;
+         PRAGMA user_version = 8;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
@@ -289,11 +289,11 @@ mod tests {
 
         let connection = Connection::open(&path).expect("database");
         connection
-            .execute_batch("PRAGMA user_version = 8")
+            .execute_batch("PRAGMA user_version = 9")
             .expect("version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(8))
+            Err(PersistenceError::UnsupportedCheckpointVersion(9))
         ));
 
         connection
@@ -305,7 +305,7 @@ mod tests {
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 7; UPDATE world SET tick = '0'")
+            .execute_batch("PRAGMA user_version = 8; UPDATE world SET tick = '0'")
             .expect("corrupt checkpoint");
         assert!(matches!(
             load_world(&path),

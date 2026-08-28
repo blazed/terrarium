@@ -1,6 +1,6 @@
 use super::{
-    ActionRejection, AgentId, DialogueTone, EventId, LocationId, ObservationTarget, Offering, Tick,
-    TownEventKind,
+    ActionRejection, AgentId, DialogueTone, EventId, Item, LocationId, ObservationTarget, Offering,
+    Tick, TownEventKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +66,10 @@ pub enum EventKind {
         agent: AgentId,
         offering: Offering,
         cost: u64,
+    },
+    ItemUsed {
+        agent: AgentId,
+        item: Item,
     },
     Rested {
         agent: AgentId,

@@ -51,18 +51,19 @@ pub fn render_dashboard(world: &World) -> String {
             counts.rejected
         ),
         format!(
-            "Purchases: {} | Rests: {} | Work: {} | Goals completed: {}",
-            counts.purchases, counts.rests, counts.work, counts.goals
+            "Purchases: {} | Items used: {} | Rests: {} | Work: {} | Goals completed: {}",
+            counts.purchases, counts.items_used, counts.rests, counts.work, counts.goals
         ),
         String::new(),
         "RESIDENTS".into(),
         format!(
-            "{:<12} {:<14} {:<9} {:>6} {:>5} {:<12} {:<20} {:<14} {:<15} {}",
+            "{:<12} {:<14} {:<9} {:>6} {:>5} {:>7} {:<12} {:<20} {:<14} {:<15} {}",
             "Name",
             "Location",
             "Activity",
             "Mood",
             "Coins",
+            "M/S/R",
             "Urgent",
             "Goal",
             "Intention",
@@ -90,12 +91,16 @@ pub fn render_dashboard(world: &World) -> String {
         let relationship = strongest_relationship(world, agent);
         let rumors = agent.rumors.iter().filter(|rumor| !rumor.resolved).count();
         lines.push(format!(
-            "{:<12} {:<14} {:<9} {:>+6.2} {:>5} {:<12} {:<20} {:<14} {:<15} {}/{}",
+            "{:<12} {:<14} {:<9} {:>+6.2} {:>5} {:>7} {:<12} {:<20} {:<14} {:<15} {}/{}",
             clipped(&agent.name, 12),
             clipped(&location, 14),
             activity,
             agent.mood,
             agent.balance,
+            format!(
+                "{}/{}/{}",
+                agent.inventory.meals, agent.inventory.supplies, agent.inventory.repair_kits
+            ),
             format!("{need} {}%", (value * 100.0).round() as u8),
             clipped(&goal, 20),
             clipped(&intention, 14),
@@ -141,6 +146,7 @@ struct EventCounts {
     conversations: usize,
     confrontations: usize,
     purchases: usize,
+    items_used: usize,
     rests: usize,
     work: usize,
     goals: usize,
@@ -156,6 +162,7 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Spoke { .. } => counts.conversations += 1,
             EventKind::Confronted { .. } => counts.confrontations += 1,
             EventKind::Purchased { .. } => counts.purchases += 1,
+            EventKind::ItemUsed { .. } => counts.items_used += 1,
             EventKind::Rested { .. } => counts.rests += 1,
             EventKind::Worked { .. } => counts.work += 1,
             EventKind::GoalCompleted { .. } => counts.goals += 1,
@@ -179,6 +186,7 @@ pub fn render_summary(world: &World) -> String {
         format!("Conversations: {}", counts.conversations),
         format!("Confrontations: {}", counts.confrontations),
         format!("Purchases: {}", counts.purchases),
+        format!("Items used: {}", counts.items_used),
         format!("Rests: {}", counts.rests),
         format!("Work: {}", counts.work),
         format!("Goals completed: {}", counts.goals),
@@ -233,6 +241,9 @@ pub fn render_event(world: &World, event: &Event) -> String {
             "{time}  {} bought {offering} for {cost} coins",
             agent_name(world, *agent)
         ),
+        EventKind::ItemUsed { agent, item } => {
+            format!("{time}  {} used a {item}", agent_name(world, *agent))
+        }
         EventKind::Rested { agent } => format!("{time}  {} rested", agent_name(world, *agent)),
         EventKind::Worked {
             agent,
@@ -361,6 +372,8 @@ mod tests {
         assert_eq!(rendered, render_run(&world));
         assert!(rendered.contains("Briar Glen\nSeed: 42\nAgents: 8"));
         assert!(rendered.contains("=== RUN SUMMARY ==="));
+        assert!(rendered.contains("Items used:"));
+        assert!(rendered.contains("used a meal"));
 
         let resumed = render_run_since(&world, 10);
         assert!(!resumed.contains("07:05  "));
@@ -372,6 +385,7 @@ mod tests {
         assert!(dashboard.contains("RESIDENTS"));
         assert!(dashboard.contains("Strongest tie"));
         assert!(dashboard.contains("Coins"));
+        assert!(dashboard.contains("M/S/R"));
         assert!(dashboard.contains("B/R"));
         assert!(dashboard.contains("BUSINESSES"));
         assert!(dashboard.contains("Revenue"));
