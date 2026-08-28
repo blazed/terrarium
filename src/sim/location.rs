@@ -1,4 +1,4 @@
-use super::{AgentId, LocationId, Needs, WORK_WAGE};
+use super::{AgentId, Item, LocationId, Needs, WORK_WAGE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -28,6 +28,15 @@ pub enum Offering {
 }
 
 impl Offering {
+    pub fn item(self) -> Option<Item> {
+        match self {
+            Self::Meal => Some(Item::Meal),
+            Self::Supplies => Some(Item::Supplies),
+            Self::Repairs => Some(Item::RepairKit),
+            Self::CivicServices => None,
+        }
+    }
+
     pub fn desired(needs: &Needs) -> Option<Self> {
         if needs.food < 0.25 {
             Some(Self::Meal)

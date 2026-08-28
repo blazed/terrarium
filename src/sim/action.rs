@@ -1,4 +1,4 @@
-use super::{AgentId, Event, LocationId, Tick};
+use super::{AgentId, Event, Item, LocationId, Tick};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TALK_MESSAGE_CHARS: usize = 200;
@@ -74,6 +74,9 @@ pub enum ProposedAction {
         target: ObservationTarget,
     },
     Purchase,
+    ConsumeMeal,
+    UseSupplies,
+    UseRepairKit,
     Rest,
     Work,
     Pursue {
@@ -117,6 +120,10 @@ pub enum ActionRejection {
     SoldOut(LocationId),
     #[error("purchase costs {cost} coins but agent has {available}")]
     InsufficientFunds { cost: u64, available: u64 },
+    #[error("inventory is full for {0}")]
+    InventoryFull(Item),
+    #[error("inventory has no {0}")]
+    ItemUnavailable(Item),
     #[error("economy balance overflow")]
     EconomyOverflow,
     #[error("business at {location} cannot cover the {wage}-coin wage; cash is {available}")]
