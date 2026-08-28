@@ -3,7 +3,7 @@ use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
     sim::{
         Business, DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, Offering,
-        ProposedAction,
+        ProposedAction, TownEventKind,
     },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -65,6 +65,20 @@ impl DecisionEngine for RandomDecisionEngine {
                 })
         };
 
+        if observation
+            .town_event
+            .as_ref()
+            .is_some_and(|event| event.kind == TownEventKind::Storm)
+        {
+            return Ok(
+                if observation.current_location.id == observation.self_description.home.id {
+                    ProposedAction::Rest
+                } else {
+                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
+                },
+            );
+        }
+
         let desired_offering = Offering::desired(needs);
         if desired_offering == Some(Offering::Meal) {
             return Ok(purchase_action(observation, Offering::Meal)
@@ -99,6 +113,22 @@ impl DecisionEngine for RandomDecisionEngine {
             && let Some(action) = work_action(observation)
         {
             return Ok(action);
+        }
+
+        if let Some(event) = &observation.town_event {
+            match event.kind {
+                TownEventKind::Festival => {
+                    if let Some(companion) = preferred_companion() {
+                        return Ok(talk(observation, companion));
+                    }
+                }
+                TownEventKind::MarketDay => {
+                    if let Some(action) = work_action(observation) {
+                        return Ok(action);
+                    }
+                }
+                TownEventKind::Storm | TownEventKind::Shortage => {}
+            }
         }
 
         if let Some(confrontation) =
@@ -423,6 +453,75 @@ mod tests {
         },
     };
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn town_events_drive_shelter_socializing_and_work() {
+        let mut storm = World::briar_glen(0).expect("town");
+        storm
+            .advance_to(Tick(8 * 60 / Tick::MINUTES))
+            .expect("storm");
+        let actor = *storm.agents.keys().next().expect("resident");
+        let observation = perceive(&storm, actor).expect("observation");
+        assert_eq!(
+            RandomDecisionEngine::new(0)
+                .decide(&observation)
+                .await
+                .expect("storm decision"),
+            ProposedAction::Rest
+        );
+
+        let mut festival = World::briar_glen(1).expect("town");
+        festival
+            .advance_to(Tick(9 * 60 / Tick::MINUTES))
+            .expect("festival");
+        let actor = *festival.agents.keys().next().expect("resident");
+        let mut observation = perceive(&festival, actor).expect("observation");
+        observation.self_description.needs = crate::sim::Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        assert!(matches!(
+            RandomDecisionEngine::new(1)
+                .decide(&observation)
+                .await
+                .expect("festival decision"),
+            ProposedAction::Talk { .. }
+        ));
+
+        let mut market = World::briar_glen(3).expect("town");
+        market
+            .advance_to(Tick(11 * 60 / Tick::MINUTES))
+            .expect("market day");
+        let actor = *market
+            .agents
+            .iter()
+            .find(|(_, agent)| agent.workplace.is_some())
+            .expect("worker")
+            .0;
+        let mut observation = perceive(&market, actor).expect("observation");
+        observation.self_description.needs = crate::sim::Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        assert!(matches!(
+            RandomDecisionEngine::new(3)
+                .decide(&observation)
+                .await
+                .expect("market decision"),
+            ProposedAction::Work
+                | ProposedAction::Pursue {
+                    intention: IntentionGoal::Work
+                }
+        ));
+    }
 
     #[tokio::test]
     async fn confident_beliefs_shape_companion_and_tone() {

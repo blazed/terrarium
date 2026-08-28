@@ -1,10 +1,10 @@
-use crate::sim::{Agent, Event, Location, Tick, World, WorldError};
+use crate::sim::{Agent, Event, Location, Tick, TownEvent, World, WorldError};
 use rusqlite::{Connection, OpenFlags, params};
 use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
-const CHECKPOINT_VERSION: i64 = 6;
+const CHECKPOINT_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
@@ -13,6 +13,7 @@ pub struct StoredRun {
     pub tick: Tick,
     pub agents: Vec<Agent>,
     pub locations: Vec<Location>,
+    pub active_town_event: Option<TownEvent>,
     pub events: Vec<Event>,
 }
 
@@ -58,12 +59,13 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA user_version = 6;
+         PRAGMA user_version = 7;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
              seed TEXT NOT NULL,
-             tick TEXT NOT NULL
+             tick TEXT NOT NULL,
+             active_town_event TEXT NOT NULL CHECK (json_valid(active_town_event))
          );
          CREATE TABLE IF NOT EXISTS agents (
              id TEXT PRIMARY KEY,
@@ -85,8 +87,13 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
          DELETE FROM world;",
     )?;
     transaction.execute(
-        "INSERT INTO world (id, name, seed, tick) VALUES (1, ?1, ?2, ?3)",
-        params![world.name, world.seed.to_string(), world.tick.0.to_string()],
+        "INSERT INTO world (id, name, seed, tick, active_town_event) VALUES (1, ?1, ?2, ?3, ?4)",
+        params![
+            world.name,
+            world.seed.to_string(),
+            world.tick.0.to_string(),
+            serde_json::to_string(&world.active_town_event)?
+        ],
     )?;
     {
         let mut statement = transaction.prepare("INSERT INTO agents (id, json) VALUES (?1, ?2)")?;
@@ -120,11 +127,12 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
 
 pub fn load_run(path: impl AsRef<Path>) -> Result<StoredRun, PersistenceError> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let (name, seed, tick): (String, String, String) = connection.query_row(
-        "SELECT name, seed, tick FROM world WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let (name, seed, tick, active_town_event): (String, String, String, String) = connection
+        .query_row(
+            "SELECT name, seed, tick, active_town_event FROM world WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
 
     Ok(StoredRun {
         name,
@@ -132,6 +140,7 @@ pub fn load_run(path: impl AsRef<Path>) -> Result<StoredRun, PersistenceError> {
         tick: Tick(parse_number("tick", tick)?),
         agents: load_json_rows(&connection, "SELECT json FROM agents ORDER BY id")?,
         locations: load_json_rows(&connection, "SELECT json FROM locations ORDER BY id")?,
+        active_town_event: serde_json::from_str(&active_town_event)?,
         events: load_json_rows(&connection, "SELECT json FROM events ORDER BY sequence")?,
     })
 }
@@ -152,6 +161,7 @@ pub fn load_world(path: impl AsRef<Path>) -> Result<World, PersistenceError> {
         run.tick,
         run.agents,
         run.locations,
+        run.active_town_event,
         run.events,
     )?)
 }
@@ -219,6 +229,7 @@ mod tests {
             stored.locations,
             world.locations.values().cloned().collect::<Vec<_>>()
         );
+        assert_eq!(stored.active_town_event, world.active_town_event);
         assert_eq!(stored.events, world.events());
         assert!(stored.agents.iter().any(|agent| !agent.memories.is_empty()));
         assert!(
@@ -278,23 +289,23 @@ mod tests {
 
         let connection = Connection::open(&path).expect("database");
         connection
-            .execute_batch("PRAGMA user_version = 7")
+            .execute_batch("PRAGMA user_version = 8")
             .expect("version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(7))
+            Err(PersistenceError::UnsupportedCheckpointVersion(8))
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 5")
+            .execute_batch("PRAGMA user_version = 6")
             .expect("old version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(5))
+            Err(PersistenceError::UnsupportedCheckpointVersion(6))
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 6; UPDATE world SET tick = '0'")
+            .execute_batch("PRAGMA user_version = 7; UPDATE world SET tick = '0'")
             .expect("corrupt checkpoint");
         assert!(matches!(
             load_world(&path),

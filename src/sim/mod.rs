@@ -4,6 +4,7 @@ mod event;
 mod location;
 mod relationship;
 mod scheduler;
+mod town_event;
 mod world;
 
 pub use action::{
@@ -18,6 +19,7 @@ pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Business, Location, Offering, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
+pub use town_event::{TOWN_EVENT_DURATION, TownEvent, TownEventKind};
 pub(crate) use world::event_evidence;
 pub use world::{World, WorldError};
 

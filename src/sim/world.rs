@@ -3,7 +3,8 @@ use super::{
     ConfrontationOutcome, DialogueTone, Event, EventId, EventKind, Goal, GoalKind, GoalTarget,
     Intention, IntentionGoal, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR,
     Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, ProposedAction,
-    Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, WORK_WAGE, seeded_uuid,
+    Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind,
+    WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -49,6 +50,7 @@ pub struct World {
     pub tick: Tick,
     pub agents: BTreeMap<AgentId, Agent>,
     pub locations: BTreeMap<LocationId, Location>,
+    pub active_town_event: Option<TownEvent>,
     events: Vec<Event>,
 }
 
@@ -228,6 +230,10 @@ impl World {
             tick: Tick(NEW_WORLD_START_HOUR * 60 / Tick::MINUTES),
             agents,
             locations,
+            active_town_event: TownEvent::scheduled(
+                seed,
+                Tick(NEW_WORLD_START_HOUR * 60 / Tick::MINUTES),
+            ),
             events: Vec::new(),
         };
         for agent in agent_ids {
@@ -245,8 +251,18 @@ impl World {
             });
         }
         let elapsed = proposed.0 - self.tick.0;
+        let mut storm_ticks = 0;
+        while self.tick < proposed {
+            self.tick.0 += 1;
+            self.update_town_event();
+            storm_ticks += u64::from(
+                self.active_town_event
+                    .is_some_and(|event| event.kind == TownEventKind::Storm),
+            );
+        }
         for agent in self.agents.values_mut() {
             agent.needs.decay(elapsed);
+            agent.needs.safety = (agent.needs.safety - 0.0004 * storm_ticks as f32).max(0.0);
             agent.decay_mood(elapsed);
             agent.decay_beliefs(elapsed);
             let urgent =
@@ -266,12 +282,39 @@ impl World {
             }
             agent.goals.retain(|goal| goal.expires_at > proposed);
         }
-        self.tick = proposed;
         let agents = self.agents.keys().copied().collect::<Vec<_>>();
         for agent in agents {
             self.refresh_goals(agent);
         }
         Ok(())
+    }
+
+    fn update_town_event(&mut self) {
+        if self
+            .active_town_event
+            .is_some_and(|event| event.ends_at == self.tick)
+        {
+            let event = self.active_town_event.take().expect("active town event");
+            self.append_event(None, EventKind::TownEventEnded { kind: event.kind });
+        }
+        if self.active_town_event.is_none()
+            && let Some(event) = TownEvent::scheduled(self.seed, self.tick)
+            && event.starts_at == self.tick
+        {
+            self.active_town_event = Some(event);
+            if event.kind == TownEventKind::Storm {
+                for agent in self.agents.values_mut() {
+                    agent.intention = None;
+                }
+            }
+            self.append_event(
+                None,
+                EventKind::TownEventStarted {
+                    kind: event.kind,
+                    ends_at: event.ends_at,
+                },
+            );
+        }
     }
 
     pub fn advance_tick(&mut self) -> Result<(), WorldError> {
@@ -285,6 +328,7 @@ impl World {
         tick: Tick,
         agents: Vec<Agent>,
         locations: Vec<Location>,
+        active_town_event: Option<TownEvent>,
         events: Vec<Event>,
     ) -> Result<Self, WorldError> {
         let mut agent_map = BTreeMap::new();
@@ -311,6 +355,7 @@ impl World {
             tick,
             agents: agent_map,
             locations: location_map,
+            active_town_event,
             events,
         };
         world.validate()?;
@@ -370,7 +415,7 @@ impl World {
                     ..
                 } => {
                     *wage != WORK_WAGE
-                        || *stock_produced != STOCK_PER_SHIFT
+                        || *stock_produced != self.stock_per_shift(event.tick)
                         || event
                             .location
                             .and_then(|location| self.locations.get(&location))
@@ -401,6 +446,17 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    pub fn is_location_open(&self, location: LocationId) -> bool {
+        if self
+            .active_town_event
+            .is_some_and(|event| event.kind == TownEventKind::Storm)
+        {
+            self.agents.values().any(|agent| agent.home == location)
+        } else {
+            self.locations[&location].is_open(self.tick.hour())
+        }
     }
 
     pub fn execute(&mut self, actor: AgentId, action: ProposedAction) -> ActionResult {
@@ -445,7 +501,7 @@ impl World {
                         },
                     );
                 }
-                if !destination_location.is_open(self.tick.hour()) {
+                if !self.is_location_open(destination) {
                     return self.reject(
                         actor,
                         Some(current),
@@ -634,7 +690,7 @@ impl World {
                         ActionRejection::CannotPurchaseHere(current),
                     );
                 }
-                if !location.is_open(self.tick.hour()) {
+                if !self.is_location_open(current) {
                     return self.reject(
                         actor,
                         Some(current),
@@ -684,7 +740,7 @@ impl World {
                         ActionRejection::CannotWorkHere(current),
                     );
                 }
-                if !self.locations[&current].is_open(self.tick.hour()) {
+                if !self.is_location_open(current) {
                     return self.reject(
                         actor,
                         Some(current),
@@ -709,7 +765,7 @@ impl World {
                         },
                     );
                 }
-                let stock_produced = STOCK_PER_SHIFT;
+                let stock_produced = self.stock_per_shift(self.tick);
                 if agent.balance.checked_add(WORK_WAGE).is_none()
                     || business.wages_paid.checked_add(WORK_WAGE).is_none()
                     || business.stock.checked_add(stock_produced).is_none()
@@ -885,7 +941,7 @@ impl World {
         let mut visited = BTreeSet::from([from]);
         while let Some((location, first_step, distance)) = queue.pop_front() {
             for next in &self.locations[&location].connected {
-                if !visited.insert(*next) || !self.locations[next].is_open(self.tick.hour()) {
+                if !visited.insert(*next) || !self.is_location_open(*next) {
                     continue;
                 }
                 let first_step = if location == from { *next } else { first_step };
@@ -1178,8 +1234,7 @@ impl World {
             .keys()
             .copied()
             .filter(|destination| {
-                !visited.contains(destination)
-                    && self.locations[destination].is_open(self.tick.hour())
+                !visited.contains(destination) && self.is_location_open(*destination)
             })
             .collect::<Vec<_>>();
         if !destinations.is_empty() {
@@ -1202,7 +1257,7 @@ impl World {
                 .filter(|location| {
                     location.business.is_some_and(|business| {
                         business.stock > 0 && agent.balance >= business.price
-                    }) && location.is_open(self.tick.hour())
+                    }) && self.is_location_open(location.id)
                         && self.next_route_step(agent.location, location.id).is_ok()
                 })
                 .collect::<Vec<_>>();
@@ -1254,20 +1309,18 @@ impl World {
 
     fn goal_target_is_available(&self, target: &GoalTarget) -> bool {
         match target {
-            GoalTarget::Visit { destination } => {
-                self.locations[destination].is_open(self.tick.hour())
-            }
+            GoalTarget::Visit { destination } => self.is_location_open(*destination),
             GoalTarget::Purchase { location } => {
                 self.locations[location]
                     .business
                     .is_some_and(|business| business.stock > 0)
-                    && self.locations[location].is_open(self.tick.hour())
+                    && self.is_location_open(*location)
             }
             GoalTarget::Work { workplace } => {
                 self.locations[workplace]
                     .business
                     .is_some_and(Business::solvent)
-                    && self.locations[workplace].is_open(self.tick.hour())
+                    && self.is_location_open(*workplace)
             }
             _ => true,
         }
@@ -1335,6 +1388,14 @@ impl World {
     }
 
     fn apply_action_effects(&mut self, actor: AgentId, kind: &EventKind) {
+        let festival_bonus = if self
+            .active_town_event
+            .is_some_and(|event| event.kind == TownEventKind::Festival)
+        {
+            1.5
+        } else {
+            1.0
+        };
         match kind {
             EventKind::Moved { .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
@@ -1343,11 +1404,11 @@ impl World {
             }
             EventKind::Spoke { listener, tone, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
-                    Needs::restore(&mut agent.needs.companionship, 0.12);
-                    Needs::restore(&mut agent.needs.status, 0.01);
+                    Needs::restore(&mut agent.needs.companionship, 0.12 * festival_bonus);
+                    Needs::restore(&mut agent.needs.status, 0.01 * festival_bonus);
                 }
                 if let Some(agent) = self.agents.get_mut(listener) {
-                    Needs::restore(&mut agent.needs.companionship, 0.08);
+                    Needs::restore(&mut agent.needs.companionship, 0.08 * festival_bonus);
                 }
                 self.apply_dialogue_relationship(actor, *listener, *tone, 1.0);
                 self.apply_dialogue_relationship(*listener, actor, *tone, 0.75);
@@ -1409,7 +1470,9 @@ impl World {
                 business.stock += *stock_produced;
                 business.wages_paid += *wage;
             }
-            EventKind::Confronted { .. }
+            EventKind::TownEventStarted { .. }
+            | EventKind::TownEventEnded { .. }
+            | EventKind::Confronted { .. }
             | EventKind::GoalCompleted { .. }
             | EventKind::Waited { .. }
             | EventKind::ActionRejected { .. } => {}
@@ -1517,7 +1580,10 @@ impl World {
             EventKind::Observed { observer, .. } => adjust(*observer, 0.02),
             EventKind::GoalCompleted { agent, .. } => adjust(*agent, 0.15),
             EventKind::ActionRejected { agent, .. } => adjust(*agent, -0.06),
-            EventKind::Moved { .. } | EventKind::Waited { .. } => {}
+            EventKind::TownEventStarted { .. }
+            | EventKind::TownEventEnded { .. }
+            | EventKind::Moved { .. }
+            | EventKind::Waited { .. } => {}
         }
     }
 
@@ -1552,7 +1618,10 @@ impl World {
             | EventKind::GoalCompleted { agent, .. } => {
                 witnesses.insert(*agent);
             }
-            EventKind::Waited { .. } | EventKind::ActionRejected { .. } => return,
+            EventKind::TownEventStarted { .. }
+            | EventKind::TownEventEnded { .. }
+            | EventKind::Waited { .. }
+            | EventKind::ActionRejected { .. } => return,
         }
         if let Some(location) = event.location.and_then(|id| self.locations.get(&id)) {
             witnesses.extend(location.agents.iter().copied());
@@ -1573,7 +1642,20 @@ impl World {
         }
     }
 
+    fn stock_per_shift(&self, tick: Tick) -> u32 {
+        match TownEvent::scheduled(self.seed, tick).map(|event| event.kind) {
+            Some(TownEventKind::Shortage) => STOCK_PER_SHIFT / 2,
+            Some(TownEventKind::MarketDay) => STOCK_PER_SHIFT * 2,
+            _ => STOCK_PER_SHIFT,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), WorldError> {
+        if self.active_town_event != TownEvent::scheduled(self.seed, self.tick) {
+            return Err(WorldError::InvalidState(
+                "active town event does not match the deterministic schedule".into(),
+            ));
+        }
         for (id, location) in &self.locations {
             if location
                 .business
@@ -1765,7 +1847,7 @@ mod tests {
         ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
         DialogueTone, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention,
         IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, ProposedAction,
-        Relationship, Tick, World, WorldError,
+        Relationship, Tick, TownEvent, TownEventKind, World, WorldError,
     };
     use crate::sim::{ActivityKind, BUSINESS_STARTING_CASH, STOCK_PER_SHIFT, WORK_WAGE};
     use std::collections::BTreeSet;
@@ -1785,6 +1867,111 @@ mod tests {
             8
         );
         world.validate().expect("town should be valid");
+    }
+
+    #[test]
+    fn town_events_start_end_and_change_conditions() {
+        let mut storm = World::briar_glen(0).expect("town");
+        let home = storm.agents.values().next().expect("resident").home;
+        let non_home = storm
+            .locations
+            .keys()
+            .copied()
+            .find(|location| !storm.agents.values().any(|agent| agent.home == *location))
+            .expect("non-home location");
+        let safety = storm.agents.values().next().expect("resident").needs.safety;
+        storm
+            .advance_to(Tick(8 * 60 / Tick::MINUTES))
+            .expect("storm starts");
+        assert_eq!(
+            storm.active_town_event.expect("active").kind,
+            TownEventKind::Storm
+        );
+        assert!(storm.is_location_open(home));
+        assert!(!storm.is_location_open(non_home));
+        assert!(safety - storm.agents.values().next().expect("resident").needs.safety > 0.001);
+        assert!(matches!(
+            storm.events().last().expect("start").kind,
+            EventKind::TownEventStarted {
+                kind: TownEventKind::Storm,
+                ..
+            }
+        ));
+
+        let ends_at = storm.active_town_event.expect("active").ends_at;
+        storm.advance_to(ends_at).expect("storm ends");
+        assert_eq!(storm.active_town_event, None);
+        assert!(matches!(
+            storm.events().last().expect("end").kind,
+            EventKind::TownEventEnded {
+                kind: TownEventKind::Storm
+            }
+        ));
+
+        storm.active_town_event = Some(TownEvent {
+            kind: TownEventKind::Festival,
+            starts_at: storm.tick,
+            ends_at: Tick(storm.tick.0 + 1),
+        });
+        assert!(matches!(storm.validate(), Err(WorldError::InvalidState(_))));
+    }
+
+    #[test]
+    fn festivals_and_market_conditions_modify_existing_actions() {
+        let mut festival = World::briar_glen(1).expect("town");
+        let residents = festival.agents.keys().copied().take(2).collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[1];
+        let home = festival.agents[&speaker].home;
+        festival.relocate(speaker, home);
+        festival.relocate(listener, home);
+        festival
+            .advance_to(Tick(9 * 60 / Tick::MINUTES))
+            .expect("festival starts");
+        festival
+            .agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .needs
+            .companionship = 0.0;
+        festival
+            .agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .needs
+            .status = 0.0;
+        festival.execute(
+            speaker,
+            ProposedAction::Talk {
+                target: listener,
+                tone: DialogueTone::Neutral,
+                message: "Enjoy the festival!".into(),
+            },
+        );
+        assert!(festival.agents[&speaker].needs.companionship > 0.17);
+        assert!(festival.agents[&speaker].needs.status >= 0.015);
+
+        for (seed, expected_kind, expected_stock) in [
+            (2, TownEventKind::Shortage, STOCK_PER_SHIFT / 2),
+            (3, TownEventKind::MarketDay, STOCK_PER_SHIFT * 2),
+        ] {
+            let mut world = World::briar_glen(seed).expect("town");
+            let (worker, workplace) = world
+                .agents
+                .iter()
+                .find_map(|(id, agent)| agent.workplace.map(|workplace| (*id, workplace)))
+                .expect("worker");
+            world.relocate(worker, workplace);
+            world
+                .advance_to(Tick((8 + seed) * 60 / Tick::MINUTES))
+                .expect("event starts");
+            assert_eq!(world.active_town_event.expect("active").kind, expected_kind);
+            assert!(matches!(
+                world.execute(worker, ProposedAction::Work),
+                ActionResult::Success(ref events)
+                    if matches!(events[0].kind, EventKind::Worked { stock_produced, .. } if stock_produced == expected_stock)
+            ));
+        }
     }
 
     #[test]
@@ -2368,7 +2555,7 @@ mod tests {
 
     #[test]
     fn closed_locations_reject_entry_and_activity_but_allow_departure() {
-        let mut world = World::briar_glen(4).expect("town");
+        let mut world = World::briar_glen(5).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let home = world.agents[&actor].home;
         let tavern = world
