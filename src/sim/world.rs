@@ -1,10 +1,10 @@
 use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, BUSINESS_STARTING_CASH, Business,
-    ConfrontationOutcome, DialogueTone, Event, EventId, EventKind, Goal, GoalKind, GoalTarget,
-    Intention, IntentionGoal, Inventory, Item, Location, LocationId, MAX_TALK_MESSAGE_CHARS,
-    NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation, Offering, OpeningHours,
-    Personality, ProposedAction, Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick,
-    TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
+    ConfrontationOutcome, DeathCause, DialogueTone, DiseaseState, Event, EventId, EventKind, Goal,
+    GoalKind, GoalTarget, Intention, IntentionGoal, Inventory, Item, LifeState, Location,
+    LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
+    Offering, OpeningHours, Personality, ProposedAction, Relationship, Rumor, STARTING_STOCK,
+    STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -15,6 +15,13 @@ const RUMOR_LIMIT: usize = 20;
 const INTENTION_DURATION_TICKS: u64 = 36;
 const GOAL_LIMIT: usize = 3;
 const GOAL_DURATION_TICKS: u64 = Tick::PER_DAY;
+const PATIENT_ZERO_TICK: u64 = Tick::PER_DAY + 8 * 60 / Tick::MINUTES;
+const INCUBATION_TICKS: u64 = Tick::PER_DAY;
+const SYMPTOMATIC_TICKS: u64 = 2 * Tick::PER_DAY;
+const RECOVERY_TICKS: u64 = Tick::PER_DAY;
+const IMMUNITY_TICKS: u64 = 3 * Tick::PER_DAY;
+const DISEASE_DAMAGE_PER_TICK: f32 = 0.001;
+const CLINIC_PRICE: u64 = 12;
 
 pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
     match kind {
@@ -65,6 +72,7 @@ impl World {
             "Riverside Houses",
             "Abandoned Mill",
             "Carpenter's Workshop",
+            "Briar Glen Clinic",
         ];
         let location_ids: Vec<_> = (0..location_names.len())
             .map(|index| LocationId(seeded_uuid(2, seed, index as u32)))
@@ -77,6 +85,7 @@ impl World {
                     "The Crooked Lantern" | "Mara's Bakery" => Some((Offering::Meal, 5)),
                     "General Store" | "Abandoned Mill" => Some((Offering::Supplies, 6)),
                     "Carpenter's Workshop" => Some((Offering::Repairs, 8)),
+                    "Briar Glen Clinic" => Some((Offering::Medicine, CLINIC_PRICE)),
                     "Town Hall" => Some((Offering::CivicServices, 4)),
                     _ => None,
                 };
@@ -106,6 +115,10 @@ impl World {
                                 opens_at_hour: 6,
                                 closes_at_hour: 20,
                             }),
+                            "Briar Glen Clinic" => Some(OpeningHours {
+                                opens_at_hour: 8,
+                                closes_at_hour: 20,
+                            }),
                             "Riverside Houses" => None,
                             _ => Some(OpeningHours {
                                 opens_at_hour: 8,
@@ -133,6 +146,8 @@ impl World {
             (5, 6),
             (5, 7),
             (6, 7),
+            (2, 8),
+            (5, 8),
         ] {
             locations
                 .get_mut(&location_ids[left])
@@ -154,7 +169,7 @@ impl World {
             ("Clara Voss", 38, Occupation::Teacher, 2),
             ("Sheriff Hale", 52, Occupation::Sheriff, 2),
             ("Jonas Reed", 44, Occupation::Publican, 0),
-            ("Iris Bell", 27, Occupation::Clerk, 2),
+            ("Iris Bell", 27, Occupation::Doctor, 8),
         ];
         let mut agents = BTreeMap::new();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -189,6 +204,10 @@ impl World {
                     status: vary_need(0.35),
                     energy: vary_need(0.8),
                 },
+                health: 1.0,
+                injury: false,
+                disease: DiseaseState::Susceptible,
+                life: LifeState::Alive,
                 balance: 20,
                 inventory: Inventory::default(),
                 activity: None,
@@ -244,6 +263,146 @@ impl World {
         Ok(world)
     }
 
+    fn advance_disease_tick(&mut self) -> Vec<AgentId> {
+        let mut emitted = Vec::new();
+        if self.tick.0 == PATIENT_ZERO_TICK
+            && !self
+                .agents
+                .values()
+                .any(|agent| agent.is_alive() && agent.disease.is_infected())
+        {
+            let alive = self
+                .agents
+                .values()
+                .filter(|agent| agent.is_alive())
+                .map(|agent| agent.id)
+                .collect::<Vec<_>>();
+            if !alive.is_empty() {
+                let patient_zero = alive[(self.seed as usize) % alive.len()];
+                let location = self.agents[&patient_zero].location;
+                self.agents
+                    .get_mut(&patient_zero)
+                    .expect("patient zero")
+                    .disease = DiseaseState::Incubating {
+                    until: Tick(self.tick.0 + INCUBATION_TICKS),
+                };
+                emitted.push((
+                    Some(location),
+                    EventKind::DiseaseInfected {
+                        agent: patient_zero,
+                        source: None,
+                    },
+                ));
+            }
+        }
+
+        let transitions = self
+            .agents
+            .values()
+            .filter(|agent| agent.is_alive())
+            .filter_map(|agent| {
+                let next = match agent.disease {
+                    DiseaseState::Incubating { until } if until <= self.tick => Some((
+                        DiseaseState::Symptomatic {
+                            until: Tick(self.tick.0 + SYMPTOMATIC_TICKS),
+                        },
+                        Some(EventKind::DiseaseSymptoms { agent: agent.id }),
+                    )),
+                    DiseaseState::Symptomatic { until } if until <= self.tick => Some((
+                        DiseaseState::Recovering {
+                            until: Tick(self.tick.0 + RECOVERY_TICKS),
+                        },
+                        Some(EventKind::DiseaseRecovered { agent: agent.id }),
+                    )),
+                    DiseaseState::Recovering { until } if until <= self.tick => Some((
+                        DiseaseState::Immune {
+                            until: Tick(self.tick.0 + IMMUNITY_TICKS),
+                        },
+                        None,
+                    )),
+                    DiseaseState::Immune { until } if until <= self.tick => Some((
+                        DiseaseState::Susceptible,
+                        Some(EventKind::DiseaseImmunityExpired { agent: agent.id }),
+                    )),
+                    _ => None,
+                }?;
+                Some((agent.id, agent.location, next.0, next.1))
+            })
+            .collect::<Vec<_>>();
+        for (agent, location, disease, event) in transitions {
+            self.agents.get_mut(&agent).expect("disease owner").disease = disease;
+            if let Some(event) = event {
+                emitted.push((Some(location), event));
+            }
+        }
+
+        if self.tick.0.is_multiple_of(60 / Tick::MINUTES) {
+            let infectious = self
+                .agents
+                .values()
+                .filter(|agent| agent.is_alive() && agent.disease.is_symptomatic())
+                .map(|agent| (agent.id, agent.location))
+                .collect::<Vec<_>>();
+            let susceptible = self
+                .agents
+                .values()
+                .filter(|agent| {
+                    agent.is_alive() && matches!(agent.disease, DiseaseState::Susceptible)
+                })
+                .map(|agent| (agent.id, agent.location))
+                .collect::<Vec<_>>();
+            for (source, source_location) in infectious {
+                for (target, target_location) in susceptible.iter().copied() {
+                    if source_location != target_location
+                        || !matches!(self.agents[&target].disease, DiseaseState::Susceptible)
+                        || !self.disease_exposure_succeeds(source, target)
+                    {
+                        continue;
+                    }
+                    self.agents
+                        .get_mut(&target)
+                        .expect("infection target")
+                        .disease = DiseaseState::Incubating {
+                        until: Tick(self.tick.0 + INCUBATION_TICKS),
+                    };
+                    emitted.push((
+                        Some(target_location),
+                        EventKind::DiseaseInfected {
+                            agent: target,
+                            source: Some(source),
+                        },
+                    ));
+                }
+            }
+        }
+
+        for (location, event) in emitted {
+            self.append_event(location, event);
+        }
+        self.agents
+            .values()
+            .filter(|agent| agent.is_alive() && agent.disease.is_symptomatic())
+            .map(|agent| agent.id)
+            .collect()
+    }
+
+    fn disease_exposure_succeeds(&self, source: AgentId, target: AgentId) -> bool {
+        let source = source.0.as_u128();
+        let target = target.0.as_u128();
+        let mut value = self.seed
+            ^ self.tick.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ source as u64
+            ^ (source >> 64) as u64
+            ^ target as u64
+            ^ (target >> 64) as u64;
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        value % 100 < 35
+    }
+
     pub fn advance_to(&mut self, proposed: Tick) -> Result<(), WorldError> {
         if proposed <= self.tick {
             return Err(WorldError::NonMonotonicTick {
@@ -253,15 +412,23 @@ impl World {
         }
         let elapsed = proposed.0 - self.tick.0;
         let mut storm_ticks = 0;
+        let mut disease_ticks = BTreeMap::<AgentId, u64>::new();
         while self.tick < proposed {
             self.tick.0 += 1;
             self.update_town_event();
+            for agent in self.advance_disease_tick() {
+                *disease_ticks.entry(agent).or_default() += 1;
+            }
             storm_ticks += u64::from(
                 self.active_town_event
                     .is_some_and(|event| event.kind == TownEventKind::Storm),
             );
         }
+        let mut deaths = Vec::new();
         for agent in self.agents.values_mut() {
+            if !agent.is_alive() {
+                continue;
+            }
             agent.needs.decay(elapsed);
             agent.needs.safety = (agent.needs.safety - 0.0004 * storm_ticks as f32).max(0.0);
             agent.decay_mood(elapsed);
@@ -282,8 +449,71 @@ impl World {
                 agent.intention = None;
             }
             agent.goals.retain(|goal| goal.expires_at > proposed);
+            let critical_needs = [agent.needs.food, agent.needs.energy, agent.needs.safety]
+                .into_iter()
+                .filter(|need| *need < 0.05)
+                .count();
+            let damage = (critical_needs as f32 * 0.00001
+                + if agent.injury { 0.000005 } else { 0.0 })
+                * elapsed as f32
+                + disease_ticks.get(&agent.id).copied().unwrap_or_default() as f32
+                    * DISEASE_DAMAGE_PER_TICK;
+            agent.health = (agent.health - damage).max(0.0);
+            agent.mood = (agent.mood - damage * 10.0).max(-1.0);
+            if agent.needs.safety < 0.05 {
+                agent.injury = true;
+            }
+            if agent.health <= 0.0 {
+                let cause = if agent.disease.is_symptomatic() {
+                    DeathCause::Disease
+                } else if agent.needs.food <= agent.needs.energy
+                    && agent.needs.food <= agent.needs.safety
+                {
+                    DeathCause::Starvation
+                } else if agent.needs.energy <= agent.needs.safety {
+                    DeathCause::Exhaustion
+                } else {
+                    DeathCause::Injury
+                };
+                agent.life = LifeState::Dead {
+                    tick: proposed,
+                    cause,
+                };
+                agent.disease = DiseaseState::Susceptible;
+                agent.activity = None;
+                agent.intention = None;
+                agent.goals.clear();
+                deaths.push((agent.id, agent.location, cause));
+            }
         }
-        let agents = self.agents.keys().copied().collect::<Vec<_>>();
+        let deceased = deaths
+            .iter()
+            .map(|(agent, _, _)| *agent)
+            .collect::<BTreeSet<_>>();
+        for (agent, location, _) in &deaths {
+            if let Some(location) = self.locations.get_mut(location) {
+                location.agents.remove(agent);
+            }
+        }
+        for (agent, location, cause) in deaths {
+            self.append_event(Some(location), EventKind::Died { agent, cause });
+        }
+        for agent in self.agents.values_mut().filter(|agent| agent.is_alive()) {
+            if agent.intention.as_ref().is_some_and(|intention| {
+                matches!(
+                    intention.goal,
+                    IntentionGoal::Talk { target, .. } if deceased.contains(&target)
+                )
+            }) {
+                agent.intention = None;
+            }
+        }
+        let agents = self
+            .agents
+            .values()
+            .filter(|agent| agent.is_alive())
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
         for agent in agents {
             self.refresh_goals(agent);
         }
@@ -402,6 +632,24 @@ impl World {
                     event.id
                 )));
             }
+            let invalid_disease_event = match &event.kind {
+                EventKind::DiseaseInfected { agent, source } => {
+                    !self.agents.contains_key(agent)
+                        || source.is_some_and(|source| {
+                            source == *agent || !self.agents.contains_key(&source)
+                        })
+                }
+                EventKind::DiseaseSymptoms { agent }
+                | EventKind::DiseaseRecovered { agent }
+                | EventKind::DiseaseImmunityExpired { agent } => !self.agents.contains_key(agent),
+                _ => false,
+            };
+            if invalid_disease_event {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} references an invalid disease agent",
+                    event.id
+                )));
+            }
             let invalid_transaction = match &event.kind {
                 EventKind::Purchased { offering, cost, .. } => event
                     .location
@@ -409,6 +657,13 @@ impl World {
                     .and_then(|location| location.business)
                     .is_none_or(|business| {
                         *offering != business.offering || *cost != business.price
+                    }),
+                EventKind::Treated { cost, .. } => event
+                    .location
+                    .and_then(|location| self.locations.get(&location))
+                    .and_then(|location| location.business)
+                    .is_none_or(|business| {
+                        business.offering != Offering::Medicine || *cost != business.price
                     }),
                 EventKind::Worked {
                     wage,
@@ -438,6 +693,12 @@ impl World {
                 .iter()
                 .chain(agent.rumors.iter().map(|rumor| &rumor.event))
             {
+                if matches!(&event.kind, EventKind::DiseaseInfected { .. }) {
+                    return Err(WorldError::InvalidState(format!(
+                        "agent {} remembers a hidden infection",
+                        agent.id
+                    )));
+                }
                 if history.get(&event.id) != Some(&event) {
                     return Err(WorldError::InvalidState(format!(
                         "agent {} knows an event absent from history",
@@ -464,6 +725,13 @@ impl World {
         let Some(agent) = self.agents.get(&actor) else {
             return self.reject(actor, None, ActionRejection::UnknownActor(actor));
         };
+        if !agent.is_alive() {
+            return self.reject(
+                actor,
+                Some(agent.location),
+                ActionRejection::AgentDead(actor),
+            );
+        }
         let current = agent.location;
 
         let kind = match action {
@@ -563,6 +831,9 @@ impl World {
                         ActionRejection::UnknownAgent(target),
                     );
                 };
+                if !target_agent.is_alive() {
+                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
+                }
                 if target_agent.location != current {
                     return self.reject(
                         actor,
@@ -604,6 +875,9 @@ impl World {
                         ActionRejection::UnknownAgent(target),
                     );
                 };
+                if !target_agent.is_alive() {
+                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
+                }
                 if target_agent.location != current {
                     return self.reject(
                         actor,
@@ -767,6 +1041,70 @@ impl World {
                     item: Item::RepairKit,
                 }
             }
+            ProposedAction::UseMedicine => {
+                if agent.inventory.medicine == 0 {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemUnavailable(Item::Medicine),
+                    );
+                }
+                if !agent.injury && !agent.disease.is_symptomatic() {
+                    return self.reject(actor, Some(current), ActionRejection::NoMedicalNeed);
+                }
+                EventKind::ItemUsed {
+                    agent: actor,
+                    item: Item::Medicine,
+                }
+            }
+            ProposedAction::SeekTreatment => {
+                let Some(business) = self.locations[&current].business else {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotSeekTreatmentHere(current),
+                    );
+                };
+                if business.offering != Offering::Medicine {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotSeekTreatmentHere(current),
+                    );
+                }
+                if !agent.injury && !agent.disease.is_symptomatic() {
+                    return self.reject(actor, Some(current), ActionRejection::NoMedicalNeed);
+                }
+                if !self.is_location_open(current) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::LocationClosed(current),
+                    );
+                }
+                if business.stock == 0 {
+                    return self.reject(actor, Some(current), ActionRejection::SoldOut(current));
+                }
+                if agent.balance < business.price {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::InsufficientFunds {
+                            cost: business.price,
+                            available: agent.balance,
+                        },
+                    );
+                }
+                if business.cash.checked_add(business.price).is_none()
+                    || business.revenue.checked_add(business.price).is_none()
+                {
+                    return self.reject(actor, Some(current), ActionRejection::EconomyOverflow);
+                }
+                EventKind::Treated {
+                    agent: actor,
+                    cost: business.price,
+                }
+            }
             ProposedAction::Rest => {
                 if current != agent.home {
                     return self.reject(
@@ -784,6 +1122,9 @@ impl World {
                         Some(current),
                         ActionRejection::CannotWorkHere(current),
                     );
+                }
+                if agent.health < 0.2 || agent.injury {
+                    return self.reject(actor, Some(current), ActionRejection::TooUnwell);
                 }
                 if !self.is_location_open(current) {
                     return self.reject(
@@ -826,11 +1167,23 @@ impl World {
             ProposedAction::Wait => EventKind::Waited { agent: actor },
         };
 
+        let starts_recovery = self.agents[&actor].disease.is_symptomatic()
+            && matches!(
+                &kind,
+                EventKind::ItemUsed {
+                    item: Item::Medicine,
+                    ..
+                } | EventKind::Treated { .. }
+            );
         self.apply_action_effects(actor, &kind);
         if let EventKind::Spoke { listener, .. } = &kind {
             self.share_rumor(actor, *listener);
         }
-        if let Some(activity) = Activity::from_event(&kind, self.tick) {
+        if let Some(mut activity) = Activity::from_event(&kind, self.tick) {
+            if self.agents[&actor].health < 0.5 {
+                let duration = activity.until.0.saturating_sub(self.tick.0);
+                activity.until = Tick(self.tick.0.saturating_add(duration.saturating_mul(2)));
+            }
             self.agents.get_mut(&actor).expect("known actor").activity = Some(activity);
             let other = match &kind {
                 EventKind::Spoke { listener, .. } => Some(*listener),
@@ -846,6 +1199,11 @@ impl World {
         }
         let completed_goal = self.advance_goal(actor, &kind);
         let mut events = vec![self.append_event(Some(current), kind)];
+        if starts_recovery {
+            events.push(
+                self.append_event(Some(current), EventKind::DiseaseRecovered { agent: actor }),
+            );
+        }
         if let Some(goal) = completed_goal {
             events.push(self.append_event(
                 Some(current),
@@ -872,6 +1230,9 @@ impl World {
     }
 
     pub fn continue_intention(&mut self, actor: AgentId) -> Option<ActionResult> {
+        if !self.agents.get(&actor).is_some_and(Agent::is_alive) {
+            return None;
+        }
         let intention = self.agents.get(&actor)?.intention.clone()?;
         let needs = &self.agents.get(&actor)?.needs;
         let purchase_offering = match intention.goal {
@@ -952,6 +1313,16 @@ impl World {
                     travel(agent.home)
                 }
             }
+            IntentionGoal::SeekTreatment => {
+                let clinic = self
+                    .clinic_location()
+                    .ok_or(ActionRejection::CannotSeekTreatmentHere(agent.location))?;
+                if agent.location == clinic {
+                    Ok(Some(ProposedAction::SeekTreatment))
+                } else {
+                    travel(clinic)
+                }
+            }
             IntentionGoal::Work => {
                 let workplace = agent
                     .workplace
@@ -972,6 +1343,15 @@ impl World {
                 message: message.clone(),
             })),
         }
+    }
+
+    pub(crate) fn clinic_location(&self) -> Option<LocationId> {
+        self.locations.iter().find_map(|(id, location)| {
+            location
+                .business
+                .is_some_and(|business| business.offering == Offering::Medicine)
+                .then_some(*id)
+        })
     }
 
     pub(crate) fn shortest_open_route(
@@ -1188,6 +1568,9 @@ impl World {
         let Some(agent) = self.agents.get(&actor) else {
             return;
         };
+        if !agent.is_alive() {
+            return;
+        }
         let mut goals = agent.goals.clone();
         goals.retain(|goal| {
             goal.expires_at > self.tick
@@ -1232,9 +1615,9 @@ impl World {
 
         let mut residents = self
             .agents
-            .keys()
-            .copied()
-            .filter(|resident| *resident != actor)
+            .values()
+            .filter(|resident| resident.is_alive() && resident.id != actor)
+            .map(|resident| resident.id)
             .collect::<Vec<_>>();
         residents.sort_by(|left, right| {
             let score = |resident| {
@@ -1312,6 +1695,13 @@ impl World {
                 Offering::Meal => 1.0 - agent.needs.food,
                 Offering::Supplies => (1.0 - agent.needs.safety) * 0.8,
                 Offering::Repairs => 1.0 - agent.needs.safety,
+                Offering::Medicine => {
+                    if agent.injury || agent.disease.is_symptomatic() {
+                        1.0 - agent.health
+                    } else {
+                        -1.0
+                    }
+                }
                 Offering::CivicServices => 1.0 - agent.needs.status,
             };
             candidates.push((
@@ -1376,7 +1766,7 @@ impl World {
         match target {
             GoalTarget::Work { workplace } => agent.workplace == Some(*workplace),
             GoalTarget::Talk { resident } => {
-                *resident != actor && self.agents.contains_key(resident)
+                *resident != actor && self.agents.get(resident).is_some_and(Agent::is_alive)
             }
             GoalTarget::Visit { destination } => {
                 *destination != agent.location && self.locations.contains_key(destination)
@@ -1489,16 +1879,57 @@ impl World {
                         Item::Meal => {
                             Needs::restore(&mut agent.needs.food, 0.35);
                             Needs::restore(&mut agent.needs.energy, 0.02);
+                            agent.health = (agent.health + 0.01).min(1.0);
                         }
-                        Item::Supplies => Needs::restore(&mut agent.needs.safety, 0.2),
-                        Item::RepairKit => Needs::restore(&mut agent.needs.safety, 0.35),
+                        Item::Supplies => {
+                            Needs::restore(&mut agent.needs.safety, 0.2);
+                            agent.health = (agent.health + 0.03).min(1.0);
+                        }
+                        Item::RepairKit => {
+                            Needs::restore(&mut agent.needs.safety, 0.35);
+                            agent.health = (agent.health + 0.15).min(1.0);
+                            agent.injury = false;
+                        }
+                        Item::Medicine => {
+                            agent.health = (agent.health + 0.25).min(1.0);
+                            agent.injury = false;
+                            if agent.disease.is_symptomatic() {
+                                agent.disease = DiseaseState::Recovering {
+                                    until: Tick(self.tick.0.saturating_add(RECOVERY_TICKS)),
+                                };
+                            }
+                        }
                     }
                 }
+            }
+            EventKind::Treated { cost, .. } => {
+                if let Some(agent) = self.agents.get_mut(&actor) {
+                    agent.balance -= *cost;
+                    agent.health = (agent.health + 0.55).min(1.0);
+                    agent.injury = false;
+                    if agent.disease.is_symptomatic() {
+                        agent.disease = DiseaseState::Recovering {
+                            until: Tick(self.tick.0.saturating_add(RECOVERY_TICKS)),
+                        };
+                    }
+                }
+                let business = self
+                    .locations
+                    .get_mut(&self.agents[&actor].location)
+                    .and_then(|location| location.business.as_mut())
+                    .expect("validated clinic");
+                business.cash += *cost;
+                business.stock -= 1;
+                business.revenue += *cost;
             }
             EventKind::Rested { .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     Needs::restore(&mut agent.needs.energy, 0.25);
                     Needs::restore(&mut agent.needs.safety, 0.05);
+                    agent.health = (agent.health + 0.03).min(1.0);
+                    if agent.health > 0.5 {
+                        agent.injury = false;
+                    }
                 }
             }
             EventKind::Worked {
@@ -1527,6 +1958,11 @@ impl World {
             | EventKind::Confronted { .. }
             | EventKind::GoalCompleted { .. }
             | EventKind::Waited { .. }
+            | EventKind::Died { .. }
+            | EventKind::DiseaseInfected { .. }
+            | EventKind::DiseaseSymptoms { .. }
+            | EventKind::DiseaseRecovered { .. }
+            | EventKind::DiseaseImmunityExpired { .. }
             | EventKind::ActionRejected { .. } => {}
         }
     }
@@ -1614,6 +2050,7 @@ impl World {
             }
             EventKind::Purchased { agent, .. } => adjust(*agent, 0.06),
             EventKind::ItemUsed { agent, .. } => adjust(*agent, 0.04),
+            EventKind::Treated { agent, .. } => adjust(*agent, 0.1),
             EventKind::Rested { agent } => adjust(*agent, 0.08),
             EventKind::Worked { agent, .. } => adjust(*agent, 0.03),
             EventKind::Confronted {
@@ -1636,6 +2073,11 @@ impl World {
             EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::Moved { .. }
+            | EventKind::Died { .. }
+            | EventKind::DiseaseInfected { .. }
+            | EventKind::DiseaseSymptoms { .. }
+            | EventKind::DiseaseRecovered { .. }
+            | EventKind::DiseaseImmunityExpired { .. }
             | EventKind::Waited { .. } => {}
         }
     }
@@ -1667,12 +2109,18 @@ impl World {
             }
             EventKind::Purchased { agent, .. }
             | EventKind::ItemUsed { agent, .. }
+            | EventKind::Treated { agent, .. }
             | EventKind::Rested { agent }
             | EventKind::Worked { agent, .. }
-            | EventKind::GoalCompleted { agent, .. } => {
+            | EventKind::GoalCompleted { agent, .. }
+            | EventKind::Died { agent, .. }
+            | EventKind::DiseaseSymptoms { agent }
+            | EventKind::DiseaseRecovered { agent }
+            | EventKind::DiseaseImmunityExpired { agent } => {
                 witnesses.insert(*agent);
             }
-            EventKind::TownEventStarted { .. }
+            EventKind::DiseaseInfected { .. }
+            | EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::Waited { .. }
             | EventKind::ActionRejected { .. } => return,
@@ -1757,7 +2205,16 @@ impl World {
         }
 
         for (id, agent) in &self.agents {
-            if !self.locations.contains_key(&agent.location) {
+            match agent.life {
+                LifeState::Alive if agent.health > 0.0 => {}
+                LifeState::Dead { tick, .. } if agent.health == 0.0 && tick <= self.tick => {}
+                _ => {
+                    return Err(WorldError::InvalidState(format!(
+                        "agent {id} has an invalid life state"
+                    )));
+                }
+            }
+            if agent.is_alive() && !self.locations.contains_key(&agent.location) {
                 return Err(WorldError::UnknownLocation(agent.location));
             }
             if !self.locations.contains_key(&agent.home) {
@@ -1772,19 +2229,44 @@ impl World {
                     "agent {id} has a workplace without a business ledger"
                 )));
             }
-            if memberships.get(id) != Some(&1) {
+            let expected_memberships = usize::from(agent.is_alive());
+            if memberships.get(id).copied().unwrap_or_default() != expected_memberships {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} belongs to {} locations",
                     memberships.get(id).copied().unwrap_or_default()
                 )));
             }
+            let disease_has_valid_until = match agent.disease {
+                DiseaseState::Susceptible => true,
+                DiseaseState::Incubating { until }
+                | DiseaseState::Symptomatic { until }
+                | DiseaseState::Recovering { until }
+                | DiseaseState::Immune { until } => until > self.tick,
+            };
+            if !agent.is_alive() && !matches!(agent.disease, DiseaseState::Susceptible) {
+                return Err(WorldError::InvalidState(format!(
+                    "dead agent {id} retains disease state"
+                )));
+            }
+            if !disease_has_valid_until {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has an expired disease stage"
+                )));
+            }
             if !agent.personality.is_normalized()
                 || !agent.needs.is_normalized()
                 || !agent.inventory.is_valid()
+                || !agent.health.is_finite()
+                || !(0.0..=1.0).contains(&agent.health)
                 || !(-1.0..=1.0).contains(&agent.mood)
             {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has non-normalized traits"
+                )));
+            }
+            if !agent.is_alive() && (agent.activity.is_some() || agent.intention.is_some()) {
+                return Err(WorldError::InvalidState(format!(
+                    "dead agent {id} retains an activity or intention"
                 )));
             }
             if agent
@@ -1802,6 +2284,7 @@ impl World {
                         self.locations.contains_key(destination)
                     }
                     IntentionGoal::Rest => self.locations.contains_key(&agent.home),
+                    IntentionGoal::SeekTreatment => self.clinic_location().is_some(),
                     IntentionGoal::Work => agent
                         .workplace
                         .is_some_and(|workplace| self.locations.contains_key(&workplace)),
@@ -1809,7 +2292,7 @@ impl World {
                         target, message, ..
                     } => {
                         target != id
-                            && self.agents.contains_key(target)
+                            && self.agents.get(target).is_some_and(Agent::is_alive)
                             && !message.trim().is_empty()
                             && !message.chars().any(char::is_control)
                             && message.chars().count() <= MAX_TALK_MESSAGE_CHARS
@@ -1900,12 +2383,15 @@ impl World {
 mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
-        DialogueTone, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention,
-        IntentionGoal, Item, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, ProposedAction,
-        Relationship, Tick, TownEvent, TownEventKind, World, WorldError,
+        DeathCause, DialogueTone, DiseaseState, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind,
+        GoalTarget, IMMUNITY_TICKS, INCUBATION_TICKS, Intention, IntentionGoal, Item, LifeState,
+        MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, PATIENT_ZERO_TICK, ProposedAction,
+        RECOVERY_TICKS, Relationship, SYMPTOMATIC_TICKS, Tick, TownEvent, TownEventKind, World,
+        WorldError,
     };
     use crate::sim::{
-        ActivityKind, BUSINESS_STARTING_CASH, MAX_ITEMS_PER_KIND, STOCK_PER_SHIFT, WORK_WAGE,
+        ActivityKind, BUSINESS_STARTING_CASH, MAX_ITEMS_PER_KIND, STOCK_PER_SHIFT, Scheduler,
+        WORK_WAGE,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -1914,7 +2400,7 @@ mod tests {
     fn briar_glen_has_consistent_residents() {
         let world = World::briar_glen(814_921).expect("town should construct");
         assert_eq!(world.agents.len(), 8);
-        assert_eq!(world.locations.len(), 8);
+        assert_eq!(world.locations.len(), 9);
         assert_eq!(
             world
                 .locations
@@ -2348,11 +2834,110 @@ mod tests {
     }
 
     #[test]
+    fn clinic_sells_medicine_and_provides_paid_treatment() {
+        let mut world = World::briar_glen(31).expect("town");
+        world.advance_to(Tick(8 * 12)).expect("clinic opening");
+        let clinic = world.clinic_location().expect("one clinic");
+        let actor = *world.agents.keys().next().expect("resident");
+        world.relocate(actor, clinic);
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.balance = 100;
+        agent.health = 0.3;
+        agent.injury = true;
+
+        let business_before = world.locations[&clinic].business.expect("clinic business");
+        assert_eq!(business_before.offering, Offering::Medicine);
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Success(_)
+        ));
+        assert_eq!(world.agents[&actor].inventory.medicine, 1);
+        assert!(matches!(
+            world.execute(actor, ProposedAction::UseMedicine),
+            ActionResult::Success(_)
+        ));
+        assert_eq!(world.agents[&actor].inventory.medicine, 0);
+        assert!(world.agents[&actor].health > 0.3);
+        assert!(!world.agents[&actor].injury);
+
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Success(_)
+        ));
+        let recovery_until = Tick(world.tick.0 + RECOVERY_TICKS);
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.health = 0.2;
+        agent.disease = DiseaseState::Symptomatic {
+            until: Tick(world.tick.0 + SYMPTOMATIC_TICKS),
+        };
+        assert!(matches!(
+            world.execute(actor, ProposedAction::UseMedicine),
+            ActionResult::Success(ref events)
+                if events.iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::DiseaseRecovered { agent } if agent == actor
+                ))
+        ));
+        assert_eq!(
+            world.agents[&actor].disease,
+            DiseaseState::Recovering {
+                until: recovery_until
+            }
+        );
+
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.health = 0.2;
+        agent.injury = true;
+        let balance_before = agent.balance;
+        let stock_before = world.locations[&clinic].business.expect("clinic").stock;
+        assert!(matches!(
+            world.execute(actor, ProposedAction::SeekTreatment),
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Treated { cost, .. } if cost == business_before.price)
+        ));
+        assert_eq!(
+            world.agents[&actor].balance,
+            balance_before - business_before.price
+        );
+        assert_eq!(
+            world.locations[&clinic].business.expect("clinic").stock,
+            stock_before - 1
+        );
+        assert!(world.agents[&actor].health > 0.2);
+        assert!(!world.agents[&actor].injury);
+        world.validate().expect("valid treated world");
+    }
+
+    #[test]
+    fn treatment_requires_the_clinic_and_a_medical_need() {
+        let mut world = World::briar_glen(32).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        world.agents.get_mut(&actor).expect("resident").balance = 100;
+        assert_eq!(
+            world.execute(actor, ProposedAction::SeekTreatment),
+            ActionResult::Rejected(ActionRejection::CannotSeekTreatmentHere(
+                world.agents[&actor].location
+            ))
+        );
+        let clinic = world.clinic_location().expect("clinic");
+        world.relocate(actor, clinic);
+        assert_eq!(
+            world.execute(actor, ProposedAction::SeekTreatment),
+            ActionResult::Rejected(ActionRejection::NoMedicalNeed)
+        );
+        assert_eq!(
+            world.execute(actor, ProposedAction::UseMedicine),
+            ActionResult::Rejected(ActionRejection::ItemUnavailable(Item::Medicine))
+        );
+    }
+
+    #[test]
     fn every_market_offering_transfers_value_and_work_restocks_it() {
         for offering in [
             Offering::Meal,
             Offering::Supplies,
             Offering::Repairs,
+            Offering::Medicine,
             Offering::CivicServices,
         ] {
             let mut world = World::briar_glen(21).expect("town");
@@ -2381,6 +2966,11 @@ mod tests {
             agent.needs.safety = 0.1;
             agent.needs.status = 0.1;
             agent.needs.companionship = 0.1;
+            if offering == Offering::Medicine {
+                agent.health = 0.4;
+                agent.injury = true;
+            }
+            let before_health = agent.health;
             let before_needs = agent.needs.clone();
             let before = world.locations[&location].business.expect("business");
 
@@ -2413,6 +3003,15 @@ mod tests {
                     assert_eq!(world.agents[&actor].inventory.repair_kits, 1);
                     world.execute(actor, ProposedAction::UseRepairKit);
                     assert!(world.agents[&actor].needs.safety > before_needs.safety);
+                }
+                Offering::Medicine => {
+                    assert_eq!(world.agents[&actor].inventory.medicine, 1);
+                    assert!(matches!(
+                        world.execute(actor, ProposedAction::UseMedicine),
+                        ActionResult::Success(_)
+                    ));
+                    assert!(world.agents[&actor].health > before_health);
+                    assert!(!world.agents[&actor].injury);
                 }
                 Offering::CivicServices => {
                     assert!(world.agents[&actor].needs.status > before_needs.status);
@@ -3341,5 +3940,296 @@ mod tests {
             world.execute(unknown, ProposedAction::Wait),
             ActionResult::Rejected(ActionRejection::UnknownActor(unknown))
         );
+    }
+
+    #[test]
+    fn critical_needs_damage_health_and_repair_recovers_injury() {
+        let mut world = World::briar_glen(19).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.health = 0.5;
+        agent.needs.food = 0.0;
+        agent.needs.energy = 1.0;
+        agent.needs.safety = 0.0;
+        agent.inventory.repair_kits = 1;
+        world.advance_to(Tick(world.tick.0 + 100)).expect("advance");
+        assert!(world.agents[&actor].health < 0.5);
+        assert!(world.agents[&actor].injury);
+        world.execute(actor, ProposedAction::UseRepairKit);
+        assert!(world.agents[&actor].health > 0.5);
+        assert!(!world.agents[&actor].injury);
+    }
+
+    #[test]
+    fn health_zero_emits_one_death_and_removes_membership() {
+        let mut world = World::briar_glen(20).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let other = *world.agents.keys().find(|id| **id != actor).expect("other");
+        let location = world.agents[&actor].location;
+        world.agents.get_mut(&other).expect("other").intention = Some(Intention {
+            goal: IntentionGoal::Talk {
+                target: actor,
+                tone: DialogueTone::Supportive,
+                message: "How are you?".into(),
+            },
+            expires_at: Tick(world.tick.0 + 10),
+        });
+        world.agents.get_mut(&actor).expect("resident").health = 0.000001;
+        world.agents.get_mut(&actor).expect("resident").needs.food = 0.0;
+        world.advance_tick().expect("advance");
+        assert!(matches!(
+            world.agents[&actor].life,
+            LifeState::Dead {
+                cause: DeathCause::Starvation,
+                ..
+            }
+        ));
+        assert!(!world.locations[&location].agents.contains(&actor));
+        assert!(world.agents[&other].intention.is_none());
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(
+                    |event| matches!(event.kind, EventKind::Died { agent, .. } if agent == actor)
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            world.execute(actor, ProposedAction::Wait),
+            ActionResult::Rejected(ActionRejection::AgentDead(actor))
+        );
+        world.validate().expect("valid dead resident history");
+    }
+
+    #[test]
+    fn briar_fever_is_deterministic_and_infection_is_hidden_from_memories() {
+        let mut world = World::briar_glen(1).expect("town");
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK))
+            .expect("patient zero");
+        let patient_zero = world
+            .events()
+            .iter()
+            .find_map(|event| match event.kind {
+                EventKind::DiseaseInfected {
+                    agent,
+                    source: None,
+                } => Some(agent),
+                _ => None,
+            })
+            .expect("patient zero event");
+        assert!(matches!(
+            world.agents[&patient_zero].disease,
+            DiseaseState::Incubating { .. }
+        ));
+        assert!(world.agents.values().all(|agent| {
+            agent
+                .memories
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::DiseaseInfected { .. }))
+        }));
+
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS))
+            .expect("symptoms");
+        assert!(matches!(
+            world.agents[&patient_zero].disease,
+            DiseaseState::Symptomatic { .. }
+        ));
+        assert!(world.events().iter().any(|event| matches!(
+            event.kind,
+            EventKind::DiseaseSymptoms { agent } if agent == patient_zero
+        )));
+        assert!(world.events().iter().any(|event| matches!(
+            event.kind,
+            EventKind::DiseaseInfected {
+                source: Some(source),
+                ..
+            } if source == patient_zero
+        )));
+    }
+
+    #[test]
+    fn briar_fever_recovers_and_immunity_expires() {
+        let mut world = World::briar_glen(1).expect("town");
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS))
+            .expect("symptoms");
+        let patient_zero = world
+            .events()
+            .iter()
+            .find_map(|event| match event.kind {
+                EventKind::DiseaseInfected {
+                    agent,
+                    source: None,
+                } => Some(agent),
+                _ => None,
+            })
+            .expect("patient zero");
+        world
+            .advance_to(Tick(
+                PATIENT_ZERO_TICK + INCUBATION_TICKS + SYMPTOMATIC_TICKS,
+            ))
+            .expect("recovery");
+        assert!(matches!(
+            world.agents[&patient_zero].disease,
+            DiseaseState::Recovering { .. }
+        ));
+        world
+            .advance_to(Tick(
+                PATIENT_ZERO_TICK + INCUBATION_TICKS + SYMPTOMATIC_TICKS + RECOVERY_TICKS,
+            ))
+            .expect("immunity");
+        assert!(matches!(
+            world.agents[&patient_zero].disease,
+            DiseaseState::Immune { .. }
+        ));
+        world
+            .advance_to(Tick(
+                PATIENT_ZERO_TICK
+                    + INCUBATION_TICKS
+                    + SYMPTOMATIC_TICKS
+                    + RECOVERY_TICKS
+                    + IMMUNITY_TICKS,
+            ))
+            .expect("immunity expiry");
+        assert_eq!(
+            world.agents[&patient_zero].disease,
+            DiseaseState::Susceptible
+        );
+        assert!(world.events().iter().any(|event| matches!(
+            event.kind,
+            EventKind::DiseaseImmunityExpired { agent } if agent == patient_zero
+        )));
+    }
+
+    #[test]
+    fn briar_fever_only_spreads_between_co_located_residents() {
+        let mut world = World::briar_glen(1).expect("town");
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK))
+            .expect("infection");
+        let patient_zero = world
+            .events()
+            .iter()
+            .find_map(|event| match event.kind {
+                EventKind::DiseaseInfected {
+                    agent,
+                    source: None,
+                } => Some(agent),
+                _ => None,
+            })
+            .expect("patient zero");
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS))
+            .expect("symptoms");
+        let target = world
+            .agents
+            .values()
+            .find(|agent| {
+                agent.id != patient_zero && matches!(agent.disease, DiseaseState::Susceptible)
+            })
+            .expect("susceptible target")
+            .id;
+        let from = world.agents[&target].location;
+        let to = *world.locations[&from]
+            .connected
+            .iter()
+            .next()
+            .expect("neighbor");
+        world
+            .locations
+            .get_mut(&from)
+            .expect("from")
+            .agents
+            .remove(&target);
+        world
+            .locations
+            .get_mut(&to)
+            .expect("to")
+            .agents
+            .insert(target);
+        world.agents.get_mut(&target).expect("target").location = to;
+        world.validate().expect("separated residents");
+        let infection_count = world
+            .events()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::DiseaseInfected { agent, source: Some(_ ) } if agent == target))
+            .count();
+        world
+            .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS + 12))
+            .expect("transmission window");
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::DiseaseInfected { agent, source: Some(_) } if agent == target))
+                .count(),
+            infection_count
+        );
+    }
+
+    #[test]
+    fn symptomatic_disease_can_cause_death_once() {
+        let mut world = World::briar_glen(22).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let location = world.agents[&actor].location;
+        let now = world.tick;
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.health = 0.0005;
+        agent.needs.food = 1.0;
+        agent.needs.energy = 1.0;
+        agent.needs.safety = 1.0;
+        agent.disease = DiseaseState::Symptomatic {
+            until: Tick(now.0 + 10),
+        };
+        world.advance_tick().expect("disease damage");
+        assert!(matches!(
+            world.agents[&actor].life,
+            LifeState::Dead {
+                cause: DeathCause::Disease,
+                ..
+            }
+        ));
+        assert_eq!(world.agents[&actor].disease, DiseaseState::Susceptible);
+        assert!(!world.locations[&location].agents.contains(&actor));
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::Died { agent, cause: DeathCause::Disease } if agent == actor))
+                .count(),
+            1
+        );
+        world.validate().expect("dead resident history");
+    }
+
+    #[test]
+    fn dead_residents_are_excluded_from_observation_and_scheduling() {
+        let mut world = World::briar_glen(21).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let location = world.agents[&actor].location;
+        world.agents.get_mut(&actor).expect("resident").life = LifeState::Dead {
+            tick: world.tick,
+            cause: DeathCause::Injury,
+        };
+        world.agents.get_mut(&actor).expect("resident").health = 0.0;
+        for agent in world.agents.values_mut() {
+            agent.goals.clear();
+        }
+        world
+            .locations
+            .get_mut(&location)
+            .expect("location")
+            .agents
+            .remove(&actor);
+        assert!(matches!(
+            crate::cognition::perceive(&world, actor),
+            Err(crate::cognition::ObservationError::AgentDead(id)) if id == actor
+        ));
+        assert!(!Scheduler.agents_to_act(&world).contains(&actor));
+        world.validate().expect("valid dead resident history");
     }
 }

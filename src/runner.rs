@@ -30,6 +30,9 @@ pub async fn run_simulation_with_events(
 ) -> Result<World, SimulationError> {
     let scheduler = Scheduler;
     for _ in 0..ticks {
+        if !world.agents.values().any(|agent| agent.is_alive()) {
+            break;
+        }
         let previous_events = world.events().len();
         world.advance_tick()?;
         for event in &world.events()[previous_events..] {
@@ -64,8 +67,37 @@ mod tests {
     use crate::{
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
-        sim::{EventKind, Intention, IntentionGoal, ProposedAction, Tick, World},
+        sim::{
+            DeathCause, EventKind, Intention, IntentionGoal, LifeState, ProposedAction, Tick, World,
+        },
     };
+
+    #[tokio::test]
+    async fn simulation_stops_when_every_resident_is_dead() {
+        let mut world = World::briar_glen(1).expect("town");
+        for location in world.locations.values_mut() {
+            location.agents.clear();
+        }
+        for agent in world.agents.values_mut() {
+            agent.health = 0.0;
+            agent.life = LifeState::Dead {
+                tick: world.tick,
+                cause: DeathCause::Injury,
+            };
+            agent.activity = None;
+            agent.intention = None;
+            agent.goals.clear();
+        }
+        world.validate().expect("valid empty population");
+        let before = world.clone();
+        let mut engine = RandomDecisionEngine::new(1);
+        assert_eq!(
+            run_simulation(world, 100, &mut engine)
+                .await
+                .expect("simulation"),
+            before
+        );
+    }
 
     #[tokio::test]
     async fn seeded_runs_are_reproducible_and_exercise_actions() {
