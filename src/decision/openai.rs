@@ -12,7 +12,7 @@ React to town_event when present: shelter at home during storms, socialize durin
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
 The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Choose a durable intention that local simulation can pursue without another model call. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use route-hint destinations for multi-step travel or purchases. Rest, work, and treatment must be currently feasible or reachable. Observe only the current location or a visible agent.
-For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
+For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. A visible resident's last_conversation is your latest direct conversation tick; when tick - last_conversation is under 72, choose a different partner or a useful non-talk action unless companionship is urgent or an active goal names them. Continue a specific topic from recent memories when possible; otherwise mention a concrete current event, place, activity, goal, belief, or rumor. Avoid generic greetings, check-ins, and wording already present in recent memories. Do not default to a question: vary naturally among statements, offers, requests, thanks, and questions. Invent no details. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"pursue","intention":{"goal":"visit","destination":"location UUID"}}
 {"action":"pursue","intention":{"goal":"purchase","destination":"route hint destination UUID"}}
@@ -378,7 +378,10 @@ mod tests {
             assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
             assert!(request.contains("self_description"));
             assert!(request.contains("progress"));
-            assert!(request.contains("relevant memories"));
+            assert!(request.contains("recent memories"));
+            assert!(request.contains("tick - last_conversation is under 72"));
+            assert!(request.contains("Avoid generic greetings, check-ins"));
+            assert!(request.contains("statements, offers, requests, thanks, and questions"));
             assert!(request.contains("200 characters"));
             assert!(request.contains("friendly|supportive|neutral|tense"));
             assert!(request.contains("Mood ranges from -1"));

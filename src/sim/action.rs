@@ -75,6 +75,7 @@ pub enum DecisionSource {
 pub struct Decision {
     pub action: ProposedAction,
     pub source: DecisionSource,
+    pub llm_proposal: Option<ProposedAction>,
 }
 
 impl Decision {
@@ -82,13 +83,23 @@ impl Decision {
         Self {
             action,
             source: DecisionSource::Local,
+            llm_proposal: None,
         }
     }
 
     pub fn llm(action: ProposedAction) -> Self {
         Self {
+            llm_proposal: Some(action.clone()),
             action,
             source: DecisionSource::Llm,
+        }
+    }
+
+    pub fn llm_intention(proposal: ProposedAction, intention: IntentionGoal) -> Self {
+        Self {
+            action: ProposedAction::Pursue { intention },
+            source: DecisionSource::Llm,
+            llm_proposal: Some(proposal),
         }
     }
 
@@ -96,6 +107,7 @@ impl Decision {
         Self {
             action,
             source: DecisionSource::LlmFallback,
+            llm_proposal: None,
         }
     }
 }

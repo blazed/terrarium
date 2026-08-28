@@ -1,5 +1,7 @@
 use std::{
-    io::{self, IsTerminal, Write},
+    collections::BTreeSet,
+    fs::File,
+    io::{self, BufWriter, IsTerminal, Write},
     path::PathBuf,
     time::Duration,
 };
@@ -10,8 +12,8 @@ use terrarium::{
     },
     observer::{render_dashboard, render_event, render_run_since, render_summary},
     persistence::{load_world, save_world},
-    runner::{run_simulation, run_simulation_with_events},
-    sim::{Tick, World},
+    runner::{LlmDecisionAudit, run_simulation, run_simulation_with_audit},
+    sim::{AgentId, IntentionGoal, Tick, World},
 };
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
@@ -23,6 +25,7 @@ struct RunArgs {
     database: Option<PathBuf>,
     resume: Option<PathBuf>,
     live: bool,
+    llm_log: Option<PathBuf>,
     decision: DecisionArgs,
 }
 
@@ -51,7 +54,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -105,6 +108,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut llm_max_completion_tokens = None;
     let mut llm_provider = None;
     let mut llm_calls_per_day = None;
+    let mut llm_log = None;
     let mut live = false;
     while let Some(flag) = args.next() {
         if flag == "--live" {
@@ -124,6 +128,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             "--database" => database = Some(value.into()),
             "--resume" => resume = Some(value.into()),
             "--llm-model" => llm_model = Some(value),
+            "--llm-log" => llm_log = Some(value.into()),
             "--llm-url" => llm_url = Some(value),
             "--llm-api-key-env" => llm_api_key_env = Some(value),
             "--llm-api" => {
@@ -219,7 +224,8 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             || llm_reasoning_effort.is_some()
             || llm_max_completion_tokens.is_some()
             || llm_provider.is_some()
-            || llm_calls_per_day.is_some() =>
+            || llm_calls_per_day.is_some()
+            || llm_log.is_some() =>
         {
             return Err(CliError::MissingLlmModel);
         }
@@ -231,6 +237,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
         database,
         resume,
         live,
+        llm_log,
         decision,
     })
 }
@@ -240,6 +247,116 @@ fn parse_number(flag: &str, value: String) -> Result<u64, CliError> {
         flag: flag.into(),
         value,
     })
+}
+
+#[derive(Debug, Error)]
+enum AuditLogError {
+    #[error("could not open LLM audit log {path}: {source}")]
+    Open { path: PathBuf, source: io::Error },
+    #[error("could not serialize LLM audit entry: {0}")]
+    Serialize(serde_json::Error),
+    #[error("could not write LLM audit log {path}: {source}")]
+    Write { path: PathBuf, source: io::Error },
+    #[error("could not flush LLM audit log {path}: {source}")]
+    Flush { path: PathBuf, source: io::Error },
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DialogueAudit {
+    conversations: u64,
+    partner_pairs: BTreeSet<(AgentId, AgentId)>,
+    questions: u64,
+}
+
+impl DialogueAudit {
+    fn record(&mut self, entry: &LlmDecisionAudit) {
+        if entry.status == "started"
+            && let IntentionGoal::Talk {
+                target, message, ..
+            } = &entry.intention
+        {
+            self.conversations += 1;
+            self.partner_pairs.insert((entry.resident_id, *target));
+            self.questions += u64::from(message.contains('?'));
+        }
+    }
+
+    fn render(&self) -> Option<String> {
+        (self.conversations > 0).then(|| {
+            format!(
+                "LLM dialogue: Talks {} | Partner pairs {} | Questions {} | Non-questions {}",
+                self.conversations,
+                self.partner_pairs.len(),
+                self.questions,
+                self.conversations - self.questions
+            )
+        })
+    }
+}
+
+struct AuditLog {
+    path: Option<PathBuf>,
+    output: Option<BufWriter<File>>,
+    error: Option<AuditLogError>,
+    dialogue: DialogueAudit,
+}
+
+impl AuditLog {
+    fn open(path: Option<PathBuf>) -> Result<Self, AuditLogError> {
+        let output = path
+            .as_ref()
+            .map(|path| {
+                File::create(path)
+                    .map(BufWriter::new)
+                    .map_err(|source| AuditLogError::Open {
+                        path: path.clone(),
+                        source,
+                    })
+            })
+            .transpose()?;
+        Ok(Self {
+            path,
+            output,
+            error: None,
+            dialogue: DialogueAudit::default(),
+        })
+    }
+
+    fn record(&mut self, entry: &LlmDecisionAudit) {
+        if self.error.is_some() {
+            return;
+        }
+        self.dialogue.record(entry);
+        let line = match serde_json::to_vec(entry) {
+            Ok(line) => line,
+            Err(error) => {
+                self.error = Some(AuditLogError::Serialize(error));
+                return;
+            }
+        };
+        if let (Some(path), Some(output)) = (&self.path, &mut self.output)
+            && let Err(source) = output
+                .write_all(&line)
+                .and_then(|()| output.write_all(b"\n"))
+        {
+            self.error = Some(AuditLogError::Write {
+                path: path.clone(),
+                source,
+            });
+        }
+    }
+
+    fn finish(mut self) -> Result<DialogueAudit, AuditLogError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if let (Some(path), Some(output)) = (self.path, &mut self.output) {
+            output
+                .flush()
+                .map_err(|source| AuditLogError::Flush { path, source })?;
+        }
+        Ok(self.dialogue)
+    }
 }
 
 struct LiveScreen {
@@ -282,12 +399,17 @@ async fn run_live(
     world: World,
     ticks: u64,
     engine: &mut impl terrarium::decision::DecisionEngine,
+    mut on_audit: impl FnMut(&LlmDecisionAudit),
 ) -> Result<World, Box<dyn std::error::Error + Send + Sync>> {
     let mut screen = LiveScreen::start()?;
     screen.draw(&world);
-    let result = run_simulation_with_events(world, ticks, engine, |world, _| {
-        screen.draw(world);
-    })
+    let result = run_simulation_with_audit(
+        world,
+        ticks,
+        engine,
+        |world, _| screen.draw(world),
+        |entry| on_audit(entry),
+    )
     .await;
     Ok(result?)
 }
@@ -308,6 +430,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 database,
                 resume,
                 live,
+                llm_log,
                 decision,
             } = args;
             let world = match &resume {
@@ -316,13 +439,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             };
             let world_seed = world.seed;
             let first_event = world.events().len();
-            let (world, streamed) = match decision {
+            let (world, streamed, dialogue_summary) = match decision {
                 DecisionArgs::Random => {
                     let mut engine = RandomDecisionEngine::new(world_seed);
                     if live {
-                        (run_live(world, ticks, &mut engine).await?, false)
+                        (
+                            run_live(world, ticks, &mut engine, |_| {}).await?,
+                            false,
+                            None,
+                        )
                     } else {
-                        (run_simulation(world, ticks, &mut engine).await?, false)
+                        (
+                            run_simulation(world, ticks, &mut engine).await?,
+                            false,
+                            None,
+                        )
                     }
                 }
                 DecisionArgs::OpenAi {
@@ -364,8 +495,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         llm,
                         calls_per_day,
                     )?;
-                    if live {
-                        (run_live(world, ticks, &mut engine).await?, false)
+                    let mut audit = AuditLog::open(llm_log)?;
+                    let result = if live {
+                        (
+                            run_live(world, ticks, &mut engine, |entry| audit.record(entry))
+                                .await?,
+                            false,
+                        )
                     } else {
                         println!(
                             "{}\nSeed: {}\nAgents: {}\n",
@@ -374,18 +510,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             world.agents.len()
                         );
                         (
-                            run_simulation_with_events(
+                            run_simulation_with_audit(
                                 world,
                                 ticks,
                                 &mut engine,
-                                |world, event| {
-                                    println!("{}", render_event(world, event));
-                                },
+                                |world, event| println!("{}", render_event(world, event)),
+                                |entry| audit.record(entry),
                             )
                             .await?,
                             true,
                         )
-                    }
+                    };
+                    let dialogue_summary = audit.finish()?.render();
+                    (result.0, result.1, dialogue_summary)
                 }
             };
             if let Some(path) = database.or(resume) {
@@ -398,6 +535,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } else {
                 println!("{}", render_run_since(&world, first_event));
             }
+            if let Some(summary) = dialogue_summary {
+                println!("{summary}");
+            }
         }
         Command::Inspect(path) => println!("{}", render_dashboard(&load_world(path)?)),
     }
@@ -406,9 +546,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, Command, DecisionArgs, RunArgs, parse_args};
-    use std::path::PathBuf;
-    use terrarium::decision::{OpenAiApi, ReasoningEffort};
+    use super::{AuditLog, AuditLogError, CliError, Command, DecisionArgs, RunArgs, parse_args};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use terrarium::{
+        decision::{OpenAiApi, ReasoningEffort},
+        runner::LlmDecisionAudit,
+        sim::{AgentId, DialogueTone, IntentionGoal, ProposedAction, Tick},
+    };
+    use uuid::Uuid;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
@@ -433,6 +582,7 @@ mod tests {
                 database: Some(PathBuf::from("run.sqlite")),
                 resume: None,
                 live: true,
+                llm_log: None,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -461,6 +611,8 @@ mod tests {
                 "Anthropic",
                 "--llm-calls-per-day",
                 "4",
+                "--llm-log",
+                "decisions.jsonl",
             ])),
             Ok(Command::Run(RunArgs {
                 seed: 814_921,
@@ -468,6 +620,7 @@ mod tests {
                 database: None,
                 resume: None,
                 live: false,
+                llm_log: Some(PathBuf::from("decisions.jsonl")),
                 decision: DecisionArgs::OpenAi {
                     model: "qwen3:8b".into(),
                     base_url: "http://localhost:1234/v1".into(),
@@ -493,6 +646,7 @@ mod tests {
                 database: None,
                 resume: None,
                 live: false,
+                llm_log: None,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -504,6 +658,7 @@ mod tests {
                 database: None,
                 resume: Some(PathBuf::from("run.sqlite")),
                 live: false,
+                llm_log: None,
                 decision: DecisionArgs::Random,
             }))
         );
@@ -521,6 +676,10 @@ mod tests {
         );
         assert_eq!(
             parse_args(args(&["run", "--llm-api-key-env", "TEST_API_KEY"])),
+            Err(CliError::MissingLlmModel)
+        );
+        assert_eq!(
+            parse_args(args(&["run", "--llm-log", "decisions.jsonl"])),
             Err(CliError::MissingLlmModel)
         );
         assert_eq!(
@@ -599,5 +758,70 @@ mod tests {
                 value: "0".into(),
             })
         );
+    }
+
+    #[test]
+    fn dialogue_audit_reports_partner_and_question_diversity() {
+        let speaker = AgentId(Uuid::nil());
+        let mut log = AuditLog::open(None).expect("audit log");
+        for (target, message) in [
+            (AgentId(Uuid::max()), "Are you well?"),
+            (AgentId(Uuid::from_u128(1)), "Thank you for helping."),
+        ] {
+            log.record(&LlmDecisionAudit {
+                tick: Tick(1),
+                resident_id: speaker,
+                resident: "Alice Vale".into(),
+                status: "started",
+                proposal: None,
+                intention: IntentionGoal::Talk {
+                    target,
+                    tone: DialogueTone::Friendly,
+                    message: message.into(),
+                },
+                action: None,
+                result: Some("success"),
+                reason: None,
+            });
+        }
+
+        assert_eq!(
+            log.finish().expect("audit summary").render().as_deref(),
+            Some("LLM dialogue: Talks 2 | Partner pairs 2 | Questions 1 | Non-questions 1")
+        );
+    }
+
+    #[test]
+    fn audit_log_writes_jsonl_and_reports_open_errors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("terrarium-audit-{nonce}.jsonl"));
+        let mut log = AuditLog::open(Some(path.clone())).expect("audit log");
+        log.record(&LlmDecisionAudit {
+            tick: Tick(1),
+            resident_id: AgentId(Uuid::nil()),
+            resident: "Alice Vale".into(),
+            status: "started",
+            proposal: Some(ProposedAction::Rest),
+            intention: IntentionGoal::Rest,
+            action: Some(ProposedAction::Rest),
+            result: Some("success"),
+            reason: None,
+        });
+        assert!(log.finish().expect("finish audit log").render().is_none());
+        let lines = fs::read_to_string(&path).expect("audit file");
+        assert_eq!(lines.lines().count(), 1);
+        serde_json::from_str::<serde_json::Value>(lines.trim()).expect("valid JSONL");
+        fs::remove_file(path).expect("remove audit file");
+
+        let missing = std::env::temp_dir()
+            .join(format!("terrarium-missing-{nonce}"))
+            .join("audit.jsonl");
+        assert!(matches!(
+            AuditLog::open(Some(missing)),
+            Err(AuditLogError::Open { .. })
+        ));
     }
 }

@@ -134,6 +134,7 @@ pub struct VisibleAgent {
     pub activity: Option<Activity>,
     pub conditions: Vec<HealthCondition>,
     pub relationship: Relationship,
+    pub last_conversation: Option<Tick>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -207,6 +208,18 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                     .get(id)
                     .copied()
                     .unwrap_or(Relationship::NEUTRAL),
+                last_conversation: agent.memories.iter().rev().find_map(|event| {
+                    matches!(
+                        &event.kind,
+                        EventKind::Spoke {
+                            speaker,
+                            listener,
+                            ..
+                        } if (*speaker == observer && *listener == *id)
+                            || (*speaker == *id && *listener == observer)
+                    )
+                    .then_some(event.tick)
+                }),
             })
         })
         .collect::<Result<Vec<_>, ObservationError>>()?;
@@ -784,6 +797,47 @@ mod tests {
                 .expect("visible agent")
                 .get("intention")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn visible_agents_show_only_direct_conversation_recency() {
+        let mut world = World::briar_glen(13).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[1];
+        let witness = residents[2];
+        assert!(matches!(
+            world.execute(
+                speaker,
+                ProposedAction::Talk {
+                    target: listener,
+                    tone: DialogueTone::Friendly,
+                    message: "Morning.".into(),
+                },
+            ),
+            ActionResult::Success(_)
+        ));
+
+        let speaker_view = perceive(&world, speaker).expect("speaker observation");
+        assert_eq!(
+            speaker_view
+                .visible_agents
+                .iter()
+                .find(|agent| agent.id == listener)
+                .expect("listener")
+                .last_conversation,
+            Some(world.tick)
+        );
+        let witness_view = perceive(&world, witness).expect("witness observation");
+        assert_eq!(
+            witness_view
+                .visible_agents
+                .iter()
+                .find(|agent| agent.id == speaker)
+                .expect("speaker")
+                .last_conversation,
+            None
         );
     }
 
