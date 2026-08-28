@@ -3,10 +3,46 @@ use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
     sim::{
         Business, Decision, DialogueTone, GoalKind, GoalTarget, HealthCondition, IntentionGoal,
-        ObservationTarget, Offering, ProposedAction, TownEventKind,
+        ObservationTarget, Offering, ProposedAction, Tick, TownEventKind,
     },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
+
+const RECENT_CONVERSATION_TICKS: u64 = Tick::PER_DAY / 4;
+
+fn recently_spoken(observation: &AgentObservation, agent: &VisibleAgent) -> bool {
+    agent
+        .last_conversation
+        .is_some_and(|last| observation.tick.0.saturating_sub(last.0) < RECENT_CONVERSATION_TICKS)
+}
+
+fn preferred_companion(
+    observation: &AgentObservation,
+    allow_recent: bool,
+) -> Option<&VisibleAgent> {
+    let relationship_score = |agent: &VisibleAgent| {
+        let relationship = agent.relationship;
+        let belief = observation
+            .beliefs
+            .get(&agent.id)
+            .map(|belief| {
+                0.5 * belief.confidence
+                    * (belief.sociability - 0.5 + belief.reliability - 0.5 - belief.hostility)
+            })
+            .unwrap_or_default();
+        relationship.score() + relationship.attraction - relationship.fear + belief
+    };
+    observation
+        .visible_agents
+        .iter()
+        .filter(|agent| observation.action_affordances.talk_to.contains(&agent.id))
+        .filter(|agent| allow_recent || !recently_spoken(observation, agent))
+        .max_by(|left, right| {
+            (!recently_spoken(observation, left))
+                .cmp(&!recently_spoken(observation, right))
+                .then_with(|| relationship_score(left).total_cmp(&relationship_score(right)))
+        })
+}
 
 pub struct RandomDecisionEngine {
     seed: u64,
@@ -43,28 +79,6 @@ impl RandomDecisionEngine {
                 intention,
             })
         };
-        let relationship_score = |agent: &VisibleAgent| {
-            let relationship = agent.relationship;
-            let belief = observation
-                .beliefs
-                .get(&agent.id)
-                .map(|belief| {
-                    0.5 * belief.confidence
-                        * (belief.sociability - 0.5 + belief.reliability - 0.5 - belief.hostility)
-                })
-                .unwrap_or_default();
-            relationship.score() + relationship.attraction - relationship.fear + belief
-        };
-        let preferred_companion = || {
-            observation
-                .visible_agents
-                .iter()
-                .filter(|agent| observation.action_affordances.talk_to.contains(&agent.id))
-                .max_by(|left, right| {
-                    relationship_score(left).total_cmp(&relationship_score(right))
-                })
-        };
-
         if observation.action_affordances.can_use_medicine {
             return Ok(ProposedAction::UseMedicine);
         }
@@ -135,7 +149,7 @@ impl RandomDecisionEngine {
             );
         }
         if needs.companionship < 0.2 + 0.1 * personality.agreeableness
-            && let Some(companion) = preferred_companion()
+            && let Some(companion) = preferred_companion(observation, true)
         {
             return Ok(talk(observation, companion));
         }
@@ -170,7 +184,7 @@ impl RandomDecisionEngine {
         if let Some(event) = &observation.town_event {
             match event.kind {
                 TownEventKind::Festival => {
-                    if let Some(companion) = preferred_companion() {
+                    if let Some(companion) = preferred_companion(observation, false) {
                         return Ok(talk(observation, companion));
                     }
                 }
@@ -372,9 +386,11 @@ impl RandomDecisionEngine {
                     destination: observation.action_affordances.move_to[index],
                 }
             }
-            1 if preferred_companion().is_some() => talk(
-                observation,
-                preferred_companion().expect("available companion"),
+            1 => preferred_companion(observation, false).map_or_else(
+                || ProposedAction::Observe {
+                    target: ObservationTarget::Location(observation.current_location.id),
+                },
+                |companion| talk(observation, companion),
             ),
             2 => {
                 let target = if observation.visible_agents.is_empty() || rng.random_bool(0.5) {
@@ -585,11 +601,22 @@ mod tests {
             status: 1.0,
             energy: 1.0,
         };
+        observation.goals.clear();
         assert!(matches!(
             RandomDecisionEngine::new(1)
                 .decide(&observation)
                 .await
                 .expect("festival decision"),
+            ProposedAction::Talk { .. }
+        ));
+        for visible in &mut observation.visible_agents {
+            visible.last_conversation = Some(observation.tick);
+        }
+        assert!(!matches!(
+            RandomDecisionEngine::new(1)
+                .decide(&observation)
+                .await
+                .expect("paced festival decision"),
             ProposedAction::Talk { .. }
         ));
 

@@ -51,8 +51,8 @@ impl<L: DecisionEngine + Send, E: DecisionEngine + Send> DecisionEngine
             return Ok(Decision::local(local.action));
         }
         match self.llm.decide(observation).await {
-            Ok(decision) => match durable_intention(observation, decision.action) {
-                Some(intention) => Ok(Decision::llm(ProposedAction::Pursue { intention })),
+            Ok(decision) => match durable_intention(observation, decision.action.clone()) {
+                Some(intention) => Ok(Decision::llm_intention(decision.action, intention)),
                 None => {
                     warn!("LLM returned no durable objective; using local proposal");
                     Ok(Decision::llm_fallback(local.action))

@@ -1378,7 +1378,7 @@ impl World {
         }
     }
 
-    fn intention_action(
+    pub(crate) fn intention_action(
         &self,
         actor: AgentId,
         intention: &Intention,
