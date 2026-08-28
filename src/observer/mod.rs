@@ -56,59 +56,111 @@ pub fn render_dashboard(world: &World) -> String {
         ),
         String::new(),
         "RESIDENTS".into(),
-        format!(
-            "{:<12} {:<14} {:<9} {:>6} {:>5} {:>7} {:<12} {:<20} {:<14} {:<15} {}",
-            "Name",
-            "Location",
-            "Activity",
-            "Mood",
-            "Coins",
-            "M/S/R",
-            "Urgent",
-            "Goal",
-            "Intention",
-            "Strongest tie",
-            "B/R"
-        ),
     ];
-    for agent in world.agents.values() {
-        let location = location_name(world, agent.location);
-        let activity = agent
-            .activity
-            .map(|activity| format!("{:?}", activity.kind))
-            .unwrap_or_else(|| "Idle".into());
-        let (need, value) = most_urgent_need(agent);
-        let goal = agent
-            .goals
-            .first()
-            .map(|goal| format!("{} [{}/{}]", goal.description, goal.progress, goal.required))
-            .unwrap_or_else(|| "—".into());
-        let intention = agent
-            .intention
-            .as_ref()
-            .map(|intention| intention_name(world, &intention.goal))
-            .unwrap_or_else(|| "—".into());
-        let relationship = strongest_relationship(world, agent);
-        let rumors = agent.rumors.iter().filter(|rumor| !rumor.resolved).count();
-        lines.push(format!(
-            "{:<12} {:<14} {:<9} {:>+6.2} {:>5} {:>7} {:<12} {:<20} {:<14} {:<15} {}/{}",
-            clipped(&agent.name, 12),
-            clipped(&location, 14),
-            activity,
-            agent.mood,
-            agent.balance,
-            format!(
-                "{}/{}/{}",
-                agent.inventory.meals, agent.inventory.supplies, agent.inventory.repair_kits
-            ),
-            format!("{need} {}%", (value * 100.0).round() as u8),
-            clipped(&goal, 20),
-            clipped(&intention, 14),
-            clipped(&relationship, 15),
-            agent.beliefs.len(),
-            rumors,
-        ));
-    }
+    let headers = [
+        "Name",
+        "Location",
+        "Activity",
+        "$",
+        "Mood",
+        "M/S/R",
+        "Needs % Mn/F/E/S/C/St",
+        "Urgent",
+        "Goal",
+        "Intention",
+        "Strongest tie",
+        "B/R",
+    ]
+    .map(str::to_owned);
+    let rows = world
+        .agents
+        .values()
+        .map(|agent| {
+            let goal = agent
+                .goals
+                .iter()
+                .find(|goal| goal.progress < goal.required)
+                .or_else(|| agent.goals.first())
+                .map(|goal| format!("{} ({}/{})", goal.description, goal.progress, goal.required))
+                .unwrap_or_else(|| "—".into());
+            let intention = agent
+                .intention
+                .as_ref()
+                .map(|intention| intention_name(world, &intention.goal))
+                .unwrap_or_else(|| "—".into());
+            let (urgent_need, urgent_value) = most_urgent_need(agent);
+            [
+                agent.name.clone(),
+                location_name(world, agent.location),
+                agent
+                    .activity
+                    .map(|activity| format!("{:?}", activity.kind))
+                    .unwrap_or_else(|| "Idle".into()),
+                agent.balance.to_string(),
+                format!("{:+.2}", agent.mood),
+                format!(
+                    "{}/{}/{}",
+                    agent.inventory.meals, agent.inventory.supplies, agent.inventory.repair_kits
+                ),
+                format!(
+                    "{}/{}/{}/{}/{}/{}",
+                    (agent.needs.money * 100.0).round() as u8,
+                    (agent.needs.food * 100.0).round() as u8,
+                    (agent.needs.energy * 100.0).round() as u8,
+                    (agent.needs.safety * 100.0).round() as u8,
+                    (agent.needs.companionship * 100.0).round() as u8,
+                    (agent.needs.status * 100.0).round() as u8,
+                ),
+                format!("{urgent_need} {}%", (urgent_value * 100.0).round() as u8),
+                goal,
+                intention,
+                strongest_relationship(world, agent),
+                format!(
+                    "{}/{}",
+                    agent.beliefs.len(),
+                    agent.rumors.iter().filter(|rumor| !rumor.resolved).count()
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let widths: [usize; 12] = std::array::from_fn(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(headers[column].chars().count())
+    });
+    let render_row = |row: &[String; 12]| {
+        format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}  {:>w4$}  {:>w5$}  {:<w6$}  {:<w7$}  {:<w8$}  {:<w9$}  {:<w10$}  {:>w11$}",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+            row[11],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4],
+            w5 = widths[5],
+            w6 = widths[6],
+            w7 = widths[7],
+            w8 = widths[8],
+            w9 = widths[9],
+            w10 = widths[10],
+            w11 = widths[11],
+        )
+    };
+    lines.push(render_row(&headers));
+    lines.extend(rows.iter().map(render_row));
 
     lines.extend([
         String::new(),
@@ -123,7 +175,7 @@ pub fn render_dashboard(world: &World) -> String {
             lines.push(format!(
                 "{:<20} {:<14} {:>6} {:>7} {:>8} {:>7} {:>6}",
                 clipped(&location.name, 20),
-                business.offering,
+                business.offering.to_string(),
                 business.cash,
                 business.stock,
                 business.revenue,
@@ -135,7 +187,7 @@ pub fn render_dashboard(world: &World) -> String {
 
     lines.extend([String::new(), "RECENT EVENTS".into()]);
     for event in world.events().iter().rev().take(8).rev() {
-        lines.push(render_event(world, event).replace('\n', " / "));
+        lines.push(render_event(world, event));
     }
     lines.join("\n")
 }
@@ -270,17 +322,6 @@ pub fn render_event(world: &World, event: &Event) -> String {
     }
 }
 
-fn strongest_relationship(world: &World, agent: &Agent) -> String {
-    agent
-        .relationships
-        .iter()
-        .max_by(|left, right| left.1.score().total_cmp(&right.1.score()))
-        .map(|(id, relationship)| {
-            format!("{} {:+.1}", agent_name(world, *id), relationship.score())
-        })
-        .unwrap_or_else(|| "—".into())
-}
-
 fn most_urgent_need(agent: &Agent) -> (&'static str, f32) {
     [
         ("money", agent.needs.money),
@@ -293,6 +334,17 @@ fn most_urgent_need(agent: &Agent) -> (&'static str, f32) {
     .into_iter()
     .min_by(|left, right| left.1.total_cmp(&right.1))
     .expect("resident has needs")
+}
+
+fn strongest_relationship(world: &World, agent: &Agent) -> String {
+    agent
+        .relationships
+        .iter()
+        .max_by(|left, right| left.1.score().total_cmp(&right.1.score()))
+        .map(|(id, relationship)| {
+            format!("{} {:+.1}", agent_name(world, *id), relationship.score())
+        })
+        .unwrap_or_else(|| "—".into())
 }
 
 fn intention_name(world: &World, goal: &IntentionGoal) -> String {
@@ -361,6 +413,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dashboard_shows_full_resident_finances_needs_and_inventory() {
+        let mut world = World::briar_glen(9).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        let name = agent.name.clone();
+        agent.balance = 37;
+        agent.mood = -0.25;
+        agent.inventory.meals = 2;
+        agent.inventory.supplies = 1;
+        agent.inventory.repair_kits = 3;
+        agent.needs.money = 0.11;
+        agent.needs.food = 0.22;
+        agent.needs.energy = 0.33;
+        agent.needs.safety = 0.44;
+        agent.needs.companionship = 0.55;
+        agent.needs.status = 0.66;
+
+        let dashboard = render_dashboard(&world);
+        let row = dashboard
+            .lines()
+            .find(|line| line.starts_with(&name))
+            .expect("resident row");
+        assert!(dashboard.contains("Needs % Mn/F/E/S/C/St"));
+        assert!(dashboard.contains("Goal"));
+        assert!(dashboard.contains("Intention"));
+        assert!(dashboard.contains("Strongest tie"));
+        assert!(row.contains("37"));
+        assert!(row.contains("-0.25"));
+        assert!(row.contains("2/1/3"));
+        assert!(row.contains("11/22/33/44/55/66"));
+    }
+
     #[tokio::test]
     async fn rendering_is_deterministic_and_readable() {
         let world = World::briar_glen(42).expect("town");
@@ -383,10 +468,11 @@ mod tests {
         let dashboard = render_dashboard(&world);
         assert!(dashboard.contains("=== Briar Glen — Day 1"));
         assert!(dashboard.contains("RESIDENTS"));
-        assert!(dashboard.contains("Strongest tie"));
-        assert!(dashboard.contains("Coins"));
+        assert!(dashboard.contains("Needs % Mn/F/E/S/C/St"));
         assert!(dashboard.contains("M/S/R"));
-        assert!(dashboard.contains("B/R"));
+        assert!(dashboard.contains("Goal"));
+        assert!(dashboard.contains("Intention"));
+        assert!(dashboard.contains("Strongest tie"));
         assert!(dashboard.contains("BUSINESSES"));
         assert!(dashboard.contains("Revenue"));
         assert!(dashboard.contains("Wages"));
