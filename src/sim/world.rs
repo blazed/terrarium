@@ -1,7 +1,7 @@
 use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, ConfrontationOutcome, DialogueTone,
-    Event, EventId, EventKind, Goal, GoalKind, Intention, IntentionGoal, Location, LocationId,
-    MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
+    Event, EventId, EventKind, Goal, GoalKind, GoalTarget, Intention, IntentionGoal, Location,
+    LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
     OpeningHours, Personality, ProposedAction, Relationship, Rumor, Tick, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -11,6 +11,8 @@ use thiserror::Error;
 const MEMORY_LIMIT: usize = 20;
 const RUMOR_LIMIT: usize = 20;
 const INTENTION_DURATION_TICKS: u64 = 36;
+const GOAL_LIMIT: usize = 3;
+const GOAL_DURATION_TICKS: u64 = Tick::PER_DAY;
 
 pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
     match kind {
@@ -178,12 +180,7 @@ impl World {
                 mood: 0.0,
                 relationships: BTreeMap::new(),
                 beliefs: BTreeMap::new(),
-                goals: vec![
-                    Goal::new(format!("Succeed as {name}"), GoalKind::Livelihood),
-                    Goal::new("Strengthen community ties", GoalKind::Community),
-                    Goal::new("Know Briar Glen", GoalKind::Exploration),
-                    Goal::new("Maintain personal wellbeing", GoalKind::Wellbeing),
-                ],
+                goals: Vec::new(),
                 memories: Vec::new(),
                 rumors: Vec::new(),
             };
@@ -212,7 +209,7 @@ impl World {
                 );
         }
 
-        let world = Self {
+        let mut world = Self {
             name: "Briar Glen".into(),
             seed,
             tick: Tick(NEW_WORLD_START_HOUR * 60 / Tick::MINUTES),
@@ -220,6 +217,9 @@ impl World {
             locations,
             events: Vec::new(),
         };
+        for agent in agent_ids {
+            world.refresh_goals(agent);
+        }
         world.validate()?;
         Ok(world)
     }
@@ -232,6 +232,7 @@ impl World {
             });
         }
         let elapsed = proposed.0 - self.tick.0;
+        let locations = &self.locations;
         for agent in self.agents.values_mut() {
             agent.needs.decay(elapsed);
             agent.decay_mood(elapsed);
@@ -245,6 +246,15 @@ impl World {
                 agent.activity = None;
             }
             let interrupt_intention = agent.intention.as_ref().is_some_and(|intention| {
+                let destination_closed = match &intention.goal {
+                    IntentionGoal::Visit { destination } => locations
+                        .get(destination)
+                        .is_none_or(|location| !location.is_open(proposed.hour())),
+                    IntentionGoal::Eat { destination } if *destination != agent.home => locations
+                        .get(destination)
+                        .is_none_or(|location| !location.is_open(proposed.hour())),
+                    _ => false,
+                };
                 let urgent_conflict = match &intention.goal {
                     IntentionGoal::Eat { .. } => {
                         agent.needs.energy < 0.1 || agent.needs.safety < 0.1
@@ -252,13 +262,18 @@ impl World {
                     IntentionGoal::Rest => agent.needs.food < 0.1 || agent.needs.safety < 0.1,
                     _ => urgent,
                 };
-                intention.expires_at <= proposed || urgent_conflict
+                intention.expires_at <= proposed || destination_closed || urgent_conflict
             });
             if interrupt_intention {
                 agent.intention = None;
             }
+            agent.goals.retain(|goal| goal.expires_at > proposed);
         }
         self.tick = proposed;
+        let agents = self.agents.keys().copied().collect::<Vec<_>>();
+        for agent in agents {
+            self.refresh_goals(agent);
+        }
         Ok(())
     }
 
@@ -658,6 +673,7 @@ impl World {
                 Some(current),
                 EventKind::GoalCompleted { agent: actor, goal },
             ));
+            self.refresh_goals(actor);
         }
         ActionResult::Success(events)
     }
@@ -966,22 +982,223 @@ impl World {
         outcome
     }
 
-    fn advance_goal(&mut self, actor: AgentId, event: &EventKind) -> Option<String> {
-        let kind = match event {
-            EventKind::Worked { .. } => GoalKind::Livelihood,
-            EventKind::Spoke { .. } => GoalKind::Community,
-            EventKind::Observed { .. } => GoalKind::Exploration,
-            EventKind::Ate { .. } | EventKind::Rested { .. } => GoalKind::Wellbeing,
-            _ => return None,
+    fn refresh_goals(&mut self, actor: AgentId) {
+        let Some(agent) = self.agents.get(&actor) else {
+            return;
         };
-        let goal = self
+        let mut goals = agent.goals.clone();
+        goals.retain(|goal| {
+            goal.expires_at > self.tick
+                && self.goal_target_is_valid(actor, &goal.target)
+                && self.goal_target_is_available(&goal.target)
+        });
+        let mut targets = goals
+            .iter()
+            .map(|goal| goal.target)
+            .collect::<BTreeSet<_>>();
+        for (_, goal) in self.goal_candidates(actor) {
+            if goals.len() == GOAL_LIMIT {
+                break;
+            }
+            if targets.insert(goal.target) {
+                goals.push(goal);
+            }
+        }
+        self.agents.get_mut(&actor).expect("known goal owner").goals = goals;
+    }
+
+    fn goal_candidates(&self, actor: AgentId) -> Vec<(f32, Goal)> {
+        let agent = &self.agents[&actor];
+        let expires_at = Tick(self.tick.0.saturating_add(GOAL_DURATION_TICKS));
+        let mut candidates = Vec::new();
+        if let Some(workplace) = agent.workplace {
+            candidates.push((
+                agent.personality.ambition + (1.0 - agent.needs.money),
+                Goal::new(
+                    format!("Complete two shifts at {}", self.locations[&workplace].name),
+                    GoalKind::Livelihood,
+                    GoalTarget::Work { workplace },
+                    2,
+                    expires_at,
+                ),
+            ));
+        }
+
+        let mut residents = self
             .agents
-            .get_mut(&actor)?
-            .goals
-            .iter_mut()
-            .find(|goal| goal.kind == kind && goal.progress < 1.0)?;
-        goal.progress = (goal.progress + 0.25).min(1.0);
-        (goal.progress == 1.0).then(|| goal.description.clone())
+            .keys()
+            .copied()
+            .filter(|resident| *resident != actor)
+            .collect::<Vec<_>>();
+        residents.sort_by(|left, right| {
+            let score = |resident| {
+                let relationship = agent
+                    .relationships
+                    .get(resident)
+                    .copied()
+                    .unwrap_or(Relationship::NEUTRAL);
+                relationship.affection + relationship.trust + relationship.respect
+                    - relationship.suspicion
+            };
+            score(right)
+                .total_cmp(&score(left))
+                .then_with(|| left.cmp(right))
+        });
+        if !residents.is_empty() {
+            let resident = residents[self.goal_choice(actor, 1, residents.len())];
+            candidates.push((
+                agent.personality.agreeableness + (1.0 - agent.needs.companionship),
+                Goal::new(
+                    format!("Catch up with {}", self.agents[&resident].name),
+                    GoalKind::Community,
+                    GoalTarget::Talk { resident },
+                    1,
+                    expires_at,
+                ),
+            ));
+        }
+
+        let visited = agent
+            .memories
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Moved {
+                    agent: mover, to, ..
+                } if mover == actor => Some(to),
+                _ => None,
+            })
+            .chain([agent.location])
+            .collect::<BTreeSet<_>>();
+        let destinations = self
+            .locations
+            .keys()
+            .copied()
+            .filter(|destination| {
+                !visited.contains(destination)
+                    && self.locations[destination].is_open(self.tick.hour())
+            })
+            .collect::<Vec<_>>();
+        if !destinations.is_empty() {
+            let destination = destinations[self.goal_choice(actor, 2, destinations.len())];
+            candidates.push((
+                (agent.personality.openness + agent.personality.impulsiveness) / 2.0,
+                Goal::new(
+                    format!("Visit {}", self.locations[&destination].name),
+                    GoalKind::Exploration,
+                    GoalTarget::Visit { destination },
+                    1,
+                    expires_at,
+                ),
+            ));
+        }
+
+        candidates.push((
+            1.0 - agent.needs.food,
+            Goal::new(
+                "Have a meal at home",
+                GoalKind::Wellbeing,
+                GoalTarget::Eat {
+                    location: agent.home,
+                },
+                1,
+                expires_at,
+            ),
+        ));
+        candidates.push((
+            1.0 - agent.needs.energy + agent.personality.neuroticism * 0.2,
+            Goal::new(
+                "Get some rest at home",
+                GoalKind::Wellbeing,
+                GoalTarget::Rest { home: agent.home },
+                1,
+                expires_at,
+            ),
+        ));
+        candidates.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .total_cmp(left_score)
+                .then_with(|| left.description.cmp(&right.description))
+        });
+        candidates
+    }
+
+    fn goal_choice(&self, actor: AgentId, salt: u128, len: usize) -> usize {
+        let changing = u128::from(self.tick.0 / Tick::PER_DAY)
+            .wrapping_add(self.agents[&actor].memories.len() as u128)
+            .wrapping_add(salt);
+        (actor.0.as_u128().wrapping_add(changing) % len as u128) as usize
+    }
+
+    fn goal_target_is_available(&self, target: &GoalTarget) -> bool {
+        match target {
+            GoalTarget::Visit { destination } => {
+                self.locations[destination].is_open(self.tick.hour())
+            }
+            _ => true,
+        }
+    }
+
+    fn goal_target_is_valid(&self, actor: AgentId, target: &GoalTarget) -> bool {
+        let agent = &self.agents[&actor];
+        match target {
+            GoalTarget::Work { workplace } => agent.workplace == Some(*workplace),
+            GoalTarget::Talk { resident } => {
+                *resident != actor && self.agents.contains_key(resident)
+            }
+            GoalTarget::Visit { destination } => {
+                *destination != agent.location && self.locations.contains_key(destination)
+            }
+            GoalTarget::Eat { location } => {
+                *location == agent.home
+                    || self
+                        .locations
+                        .get(location)
+                        .is_some_and(|location| location.serves_food)
+            }
+            GoalTarget::Rest { home } => *home == agent.home,
+        }
+    }
+
+    fn advance_goal(&mut self, actor: AgentId, event: &EventKind) -> Option<String> {
+        let location = self.agents.get(&actor)?.location;
+        let position =
+            self.agents
+                .get(&actor)?
+                .goals
+                .iter()
+                .position(|goal| match (&goal.target, event) {
+                    (GoalTarget::Work { workplace }, EventKind::Worked { agent }) => {
+                        *agent == actor && *workplace == location
+                    }
+                    (
+                        GoalTarget::Talk { resident },
+                        EventKind::Spoke {
+                            speaker, listener, ..
+                        },
+                    ) => *speaker == actor && *resident == *listener,
+                    (GoalTarget::Visit { destination }, EventKind::Moved { agent, to, .. }) => {
+                        *agent == actor && *destination == *to
+                    }
+                    (GoalTarget::Eat { location: target }, EventKind::Ate { agent }) => {
+                        *agent == actor && *target == location
+                    }
+                    (GoalTarget::Rest { home }, EventKind::Rested { agent }) => {
+                        *agent == actor && *home == location
+                    }
+                    _ => false,
+                })?;
+        let goal = &mut self.agents.get_mut(&actor)?.goals[position];
+        goal.progress = goal.progress.saturating_add(1).min(goal.required);
+        if goal.progress < goal.required {
+            return None;
+        }
+        Some(
+            self.agents
+                .get_mut(&actor)?
+                .goals
+                .remove(position)
+                .description,
+        )
     }
 
     fn apply_action_effects(&mut self, actor: AgentId, kind: &EventKind) {
@@ -1295,11 +1512,19 @@ impl World {
                     "agent {id} has an invalid belief"
                 )));
             }
-            if agent.goals.iter().any(|goal| {
-                goal.description.trim().is_empty() || !(0.0..=1.0).contains(&goal.progress)
-            }) {
+            let mut goal_targets = BTreeSet::new();
+            if agent.goals.len() > GOAL_LIMIT
+                || agent.goals.iter().any(|goal| {
+                    goal.description.trim().is_empty()
+                        || goal.required == 0
+                        || goal.progress >= goal.required
+                        || goal.expires_at <= self.tick
+                        || !goal_targets.insert(goal.target)
+                        || !self.goal_target_is_valid(*id, &goal.target)
+                })
+            {
                 return Err(WorldError::InvalidState(format!(
-                    "agent {id} has an invalid goal"
+                    "agent {id} has invalid goals"
                 )));
             }
             if agent.memories.len() > MEMORY_LIMIT {
@@ -1334,10 +1559,12 @@ impl World {
 mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, ConfrontationOutcome, DialogueTone,
-        EventId, EventKind, Intention, IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget,
-        ProposedAction, Relationship, Tick, World, WorldError,
+        EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention, IntentionGoal,
+        MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction, Relationship, Tick, World,
+        WorldError,
     };
     use crate::sim::ActivityKind;
+    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     #[test]
@@ -1354,6 +1581,37 @@ mod tests {
             8
         );
         world.validate().expect("town should be valid");
+    }
+
+    #[test]
+    fn goals_are_contextual_and_seeded() {
+        let first = World::briar_glen(11).expect("town");
+        let repeated = World::briar_glen(11).expect("same town");
+        let different = World::briar_glen(12).expect("different town");
+        let goals = |world: &World| {
+            world
+                .agents
+                .values()
+                .map(|agent| agent.goals.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(goals(&first), goals(&repeated));
+        assert_ne!(goals(&first), goals(&different));
+        assert!(first.agents.values().all(|agent| {
+            !agent.goals.is_empty()
+                && agent.goals.len() <= GOAL_LIMIT
+                && agent
+                    .goals
+                    .iter()
+                    .all(|goal| goal.expires_at == Tick(first.tick.0 + Tick::PER_DAY))
+        }));
+        let descriptions = first
+            .agents
+            .values()
+            .flat_map(|agent| agent.goals.iter().map(|goal| goal.description.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert!(descriptions.len() > GOAL_LIMIT);
     }
 
     #[test]
@@ -1468,7 +1726,7 @@ mod tests {
                 },
             );
         }
-        assert!((world.agents[&actor].mood - 0.23).abs() < f32::EPSILON * 4.0);
+        assert!((world.agents[&actor].mood - 0.08).abs() < f32::EPSILON * 4.0);
 
         world.execute(
             actor,
@@ -1478,25 +1736,44 @@ mod tests {
                 message: "Hello, me.".into(),
             },
         );
-        assert!((world.agents[&actor].mood - 0.17).abs() < f32::EPSILON * 4.0);
+        assert!((world.agents[&actor].mood - 0.02).abs() < f32::EPSILON * 4.0);
 
         world
             .advance_to(Tick(world.tick.0 + 10))
             .expect("time advances");
-        assert!((world.agents[&actor].mood - 0.15).abs() < f32::EPSILON * 4.0);
+        assert_eq!(world.agents[&actor].mood, 0.0);
         world.validate().expect("bounded mood");
         world.agents.get_mut(&actor).expect("actor").mood = 1.1;
         assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 
     #[test]
-    fn successful_actions_complete_goals_once() {
+    fn contextual_goals_match_exact_targets_and_refresh() {
         let mut world = World::briar_glen(4).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let actor = residents[0];
         let listener = residents[1];
+        let other = residents[2];
+        let expires_at = Tick(world.tick.0 + Tick::PER_DAY);
+        world.agents.get_mut(&actor).expect("actor").goals = vec![Goal::new(
+            "Speak twice with the intended resident",
+            GoalKind::Community,
+            GoalTarget::Talk { resident: listener },
+            2,
+            expires_at,
+        )];
 
-        for _ in 0..4 {
+        world.execute(
+            actor,
+            ProposedAction::Talk {
+                target: other,
+                tone: DialogueTone::Neutral,
+                message: "Hello.".into(),
+            },
+        );
+        assert_eq!(world.agents[&actor].goals[0].progress, 0);
+
+        for _ in 0..2 {
             world.execute(
                 actor,
                 ProposedAction::Talk {
@@ -1506,12 +1783,6 @@ mod tests {
                 },
             );
         }
-        let goal = world.agents[&actor]
-            .goals
-            .iter()
-            .find(|goal| goal.kind == super::GoalKind::Community)
-            .expect("community goal");
-        assert_eq!(goal.progress, 1.0);
         assert_eq!(
             world
                 .events()
@@ -1519,37 +1790,38 @@ mod tests {
                 .filter(|event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor))
                 .count(),
             1
+        );
+        assert_eq!(world.agents[&actor].goals.len(), GOAL_LIMIT);
+        assert!(
+            world.agents[&actor]
+                .goals
+                .iter()
+                .all(|goal| goal.description != "Speak twice with the intended resident")
         );
         assert!(world.agents[&listener].memories.iter().any(
             |event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor)
         ));
 
-        world.execute(
-            actor,
-            ProposedAction::Talk {
-                target: listener,
-                tone: DialogueTone::Neutral,
-                message: "Again.".into(),
-            },
-        );
-        assert_eq!(
-            world
-                .events()
-                .iter()
-                .filter(|event| matches!(event.kind, EventKind::GoalCompleted { agent, .. } if agent == actor))
-                .count(),
-            1
-        );
-
-        world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1.1;
-        assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
-
-        world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1.0;
         let home = world.agents[&actor].home;
-        world.locations.get_mut(&home).expect("home").opening_hours = Some(super::OpeningHours {
-            opens_at_hour: 18,
-            closes_at_hour: 8,
-        });
+        world.agents.get_mut(&actor).expect("actor").goals = vec![Goal::new(
+            "Expiring goal",
+            GoalKind::Exploration,
+            GoalTarget::Visit { destination: home },
+            1,
+            Tick(world.tick.0 + 1),
+        )];
+        world
+            .advance_to(Tick(world.tick.0 + 1))
+            .expect("goal expiry");
+        assert!(
+            world.agents[&actor]
+                .goals
+                .iter()
+                .all(|goal| goal.description != "Expiring goal")
+        );
+
+        world.agents.get_mut(&actor).expect("actor").goals[0].progress = 1;
+        world.agents.get_mut(&actor).expect("actor").goals[0].required = 1;
         assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
     }
 

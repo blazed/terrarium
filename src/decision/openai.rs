@@ -7,7 +7,7 @@ use std::{net::IpAddr, time::Duration};
 
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
-Prioritize urgent needs, then feasible goals whose progress is below 1.0.
+Prioritize urgent needs, then feasible active goals. Each goal has a concrete typed target, integer progress and required counts, and an expiry tick; act on the exact target rather than merely matching its broad kind.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
 The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use pursue for multi-step travel, food, rest, or work so the simulation can continue it without another decision. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
@@ -395,6 +395,9 @@ mod tests {
             assert!(request.contains(r#"{\"action\":\"confront\""#));
             assert!(request.contains(r#"\"rumors\":"#));
             assert!(request.contains(r#"\"confront\":"#));
+            assert!(request.contains("Each goal has a concrete typed target"));
+            assert!(request.contains(r#"\"required\":"#));
+            assert!(request.contains(r#"\"expires_at\":"#));
             assert!(request.contains("Each route hint has a final destination"));
             assert!(request.contains("Use pursue for multi-step travel"));
             assert!(request.contains(r#"\"destination\":"#));

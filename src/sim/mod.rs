@@ -11,7 +11,8 @@ pub use action::{
     ObservationTarget, ProposedAction,
 };
 pub use agent::{
-    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality, Rumor,
+    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, GoalTarget, Needs, Occupation,
+    Personality, Rumor,
 };
 pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Location, OpeningHours};

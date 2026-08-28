@@ -1,7 +1,7 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
-    sim::{DialogueTone, GoalKind, IntentionGoal, ObservationTarget, ProposedAction},
+    sim::{DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, ProposedAction},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -142,56 +142,77 @@ impl DecisionEngine for RandomDecisionEngine {
         ];
         goal_priorities.sort_by(|left, right| right.1.total_cmp(&left.1));
         for (goal_kind, _) in goal_priorities {
-            if !observation
-                .goals
-                .iter()
-                .any(|goal| goal.kind == goal_kind && goal.progress < 1.0)
-            {
+            let Some(goal) = observation.goals.iter().find(|goal| goal.kind == goal_kind) else {
                 continue;
-            }
-            match goal_kind {
-                GoalKind::Livelihood => {
-                    if let Some(workplace) = &observation.self_description.workplace
-                        && workplace.is_open
-                    {
-                        if observation.action_affordances.can_work {
-                            return Ok(ProposedAction::Work);
+            };
+            match goal.target {
+                GoalTarget::Work { workplace }
+                    if observation
+                        .self_description
+                        .workplace
+                        .as_ref()
+                        .is_some_and(|location| location.id == workplace && location.is_open) =>
+                {
+                    return Ok(if observation.action_affordances.can_work {
+                        ProposedAction::Work
+                    } else {
+                        ProposedAction::Pursue {
+                            intention: IntentionGoal::Work,
                         }
-                        if observation.route_hints.workplace.is_some() {
-                            return Ok(follow_route(observation.route_hints.workplace, |_| {
-                                IntentionGoal::Work
-                            }));
-                        }
-                    }
+                    });
                 }
-                GoalKind::Community => {
-                    if let Some(companion) = preferred_companion() {
+                GoalTarget::Talk { resident } => {
+                    if let Some(companion) = observation
+                        .visible_agents
+                        .iter()
+                        .find(|companion| companion.id == resident)
+                        && observation.action_affordances.talk_to.contains(&resident)
+                    {
                         return Ok(talk(observation, companion));
                     }
                 }
-                GoalKind::Exploration => {
-                    return Ok(ProposedAction::Observe {
-                        target: ObservationTarget::Location(observation.current_location.id),
-                    });
+                GoalTarget::Visit { destination } => {
+                    return Ok(
+                        if observation
+                            .action_affordances
+                            .move_to
+                            .contains(&destination)
+                        {
+                            ProposedAction::Move { destination }
+                        } else {
+                            ProposedAction::Pursue {
+                                intention: IntentionGoal::Visit { destination },
+                            }
+                        },
+                    );
                 }
-                GoalKind::Wellbeing
-                    if observation.current_location.id == observation.self_description.home.id =>
-                {
-                    return Ok(if needs.food <= needs.energy {
-                        ProposedAction::Eat
-                    } else {
-                        ProposedAction::Rest
-                    });
+                GoalTarget::Eat { location } => {
+                    return Ok(
+                        if observation.current_location.id == location
+                            && observation.action_affordances.can_eat
+                        {
+                            ProposedAction::Eat
+                        } else {
+                            ProposedAction::Pursue {
+                                intention: IntentionGoal::Eat {
+                                    destination: location,
+                                },
+                            }
+                        },
+                    );
                 }
-                GoalKind::Wellbeing if observation.action_affordances.can_eat => {
-                    return Ok(ProposedAction::Eat);
-                }
-                GoalKind::Wellbeing if observation.route_hints.food.is_some() => {
-                    return Ok(follow_route(observation.route_hints.food, |hint| {
-                        IntentionGoal::Eat {
-                            destination: hint.destination,
-                        }
-                    }));
+                GoalTarget::Rest { home } => {
+                    return Ok(
+                        if observation.current_location.id == home
+                            && observation.action_affordances.can_rest
+                        {
+                            ProposedAction::Rest
+                        } else {
+                            ProposedAction::Pursue {
+                                intention: IntentionGoal::Rest,
+                            }
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -348,7 +369,7 @@ mod tests {
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, perceive},
         sim::{
-            Belief, DialogueTone, EventId, GoalKind, IntentionGoal, ObservationTarget,
+            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal,
             ProposedAction, Relationship, Tick, World,
         },
     };
@@ -564,25 +585,28 @@ mod tests {
 
         let mut purposeful = lonely;
         purposeful.self_description.needs.companionship = 0.5;
-        for goal in &mut purposeful.goals {
-            goal.progress = 1.0;
-        }
-        purposeful
-            .goals
-            .iter_mut()
-            .find(|goal| goal.kind == GoalKind::Exploration)
-            .expect("exploration goal")
-            .progress = 0.0;
+        let destination = purposeful.action_affordances.move_to[0];
+        purposeful.goals = vec![Goal::new(
+            "Visit somewhere specific",
+            GoalKind::Exploration,
+            GoalTarget::Visit { destination },
+            1,
+            Tick(999),
+        )];
         assert_eq!(
             engine.decide(&purposeful).await.expect("decision"),
-            ProposedAction::Observe {
-                target: ObservationTarget::Location(purposeful.current_location.id)
-            }
+            ProposedAction::Move { destination }
         );
 
-        for goal in &mut purposeful.goals {
-            goal.progress = 0.0;
-        }
+        purposeful.goals = vec![Goal::new(
+            "Talk to a specific resident",
+            GoalKind::Community,
+            GoalTarget::Talk {
+                resident: preferred,
+            },
+            1,
+            Tick(999),
+        )];
         let personality = &mut purposeful.self_description.personality;
         personality.openness = 0.0;
         personality.agreeableness = 1.0;
@@ -592,10 +616,11 @@ mod tests {
         assert!(matches!(
             engine.decide(&purposeful).await.expect("decision"),
             ProposedAction::Talk {
+                target,
                 tone: DialogueTone::Supportive,
                 message,
                 ..
-            } if message.contains(&companion_name)
+            } if target == preferred && message.contains(&companion_name)
         ));
         for visible in &mut purposeful.visible_agents {
             visible.relationship = Relationship::NEUTRAL;
@@ -606,26 +631,33 @@ mod tests {
         assert!(matches!(
             engine.decide(&purposeful).await.expect("decision"),
             ProposedAction::Talk {
+                target,
                 tone: DialogueTone::Tense,
                 ..
-            }
+            } if target == preferred
         ));
 
         purposeful.self_description.mood = 0.0;
         purposeful.self_description.personality.agreeableness = 0.0;
         purposeful.self_description.personality.ambition = 1.0;
+        let workplace = purposeful
+            .self_description
+            .workplace
+            .as_ref()
+            .expect("workplace")
+            .id;
+        purposeful.goals = vec![Goal::new(
+            "Work somewhere specific",
+            GoalKind::Livelihood,
+            GoalTarget::Work { workplace },
+            1,
+            Tick(999),
+        )];
         assert_eq!(
             engine.decide(&purposeful).await.expect("decision"),
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
         );
-
-        purposeful.self_description.personality.ambition = 0.0;
-        purposeful.self_description.personality.openness = 1.0;
-        assert!(matches!(
-            engine.decide(&purposeful).await.expect("decision"),
-            ProposedAction::Observe { .. }
-        ));
     }
 }

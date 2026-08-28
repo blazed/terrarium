@@ -441,9 +441,9 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
 mod tests {
     use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
-        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, GoalKind,
-        Intention, IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship,
-        Rumor, Tick, World,
+        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, Intention,
+        IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick,
+        World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -487,15 +487,12 @@ mod tests {
             .expect("work hours");
         assert_eq!(work_hours.opens_at_hour, 8);
         assert_eq!(work_hours.closes_at_hour, 18);
-        assert_eq!(observation.goals.len(), 4);
-        assert_eq!(
+        assert!((1..=3).contains(&observation.goals.len()));
+        assert!(
             observation
                 .goals
                 .iter()
-                .find(|goal| goal.kind == GoalKind::Exploration)
-                .expect("exploration goal")
-                .progress,
-            0.25
+                .all(|goal| goal.progress < goal.required)
         );
         assert_eq!(
             observation.current_location.serves_food,
