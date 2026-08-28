@@ -42,6 +42,7 @@ pub enum IntentionGoal {
     },
     Rest,
     Work,
+    SeekTreatment,
     Talk {
         target: AgentId,
         tone: DialogueTone,
@@ -77,6 +78,8 @@ pub enum ProposedAction {
     ConsumeMeal,
     UseSupplies,
     UseRepairKit,
+    UseMedicine,
+    SeekTreatment,
     Rest,
     Work,
     Pursue {
@@ -91,6 +94,8 @@ pub enum ActionRejection {
     UnknownActor(AgentId),
     #[error("unknown agent {0}")]
     UnknownAgent(AgentId),
+    #[error("agent {0} is dead")]
+    AgentDead(AgentId),
     #[error("unknown location {0}")]
     UnknownLocation(LocationId),
     #[error("destination {destination} is not connected to {from}")]
@@ -132,10 +137,16 @@ pub enum ActionRejection {
         wage: u64,
         available: u64,
     },
+    #[error("agent cannot use medical treatment at location {0}")]
+    CannotSeekTreatmentHere(LocationId),
+    #[error("agent has no medical need")]
+    NoMedicalNeed,
     #[error("agent cannot rest at location {0}")]
     CannotRestHere(LocationId),
     #[error("agent cannot work at location {0}")]
     CannotWorkHere(LocationId),
+    #[error("agent is too unwell to work")]
+    TooUnwell,
     #[error("agent cannot work at hour {0:02}:00")]
     OutsideWorkingHours(u64),
     #[error("actor does not know rumor claim {0}")]
@@ -164,6 +175,20 @@ pub enum ActionResult {
 #[cfg(test)]
 mod tests {
     use super::{DialogueTone, ProposedAction};
+
+    #[test]
+    fn medical_actions_parse_from_strict_json_forms() {
+        assert_eq!(
+            serde_json::from_str::<ProposedAction>(r#"{"action":"use_medicine"}"#)
+                .expect("medicine action"),
+            ProposedAction::UseMedicine
+        );
+        assert_eq!(
+            serde_json::from_str::<ProposedAction>(r#"{"action":"seek_treatment"}"#)
+                .expect("treatment action"),
+            ProposedAction::SeekTreatment
+        );
+    }
 
     #[test]
     fn talk_requires_a_known_tone() {

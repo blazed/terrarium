@@ -1,6 +1,6 @@
 use super::{
-    ActionRejection, AgentId, DialogueTone, EventId, Item, LocationId, ObservationTarget, Offering,
-    Tick, TownEventKind,
+    ActionRejection, AgentId, DeathCause, DialogueTone, EventId, Item, LocationId,
+    ObservationTarget, Offering, Tick, TownEventKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +71,10 @@ pub enum EventKind {
         agent: AgentId,
         item: Item,
     },
+    Treated {
+        agent: AgentId,
+        cost: u64,
+    },
     Rested {
         agent: AgentId,
     },
@@ -84,6 +88,23 @@ pub enum EventKind {
         goal: String,
     },
     Waited {
+        agent: AgentId,
+    },
+    Died {
+        agent: AgentId,
+        cause: DeathCause,
+    },
+    DiseaseInfected {
+        agent: AgentId,
+        source: Option<AgentId>,
+    },
+    DiseaseSymptoms {
+        agent: AgentId,
+    },
+    DiseaseRecovered {
+        agent: AgentId,
+    },
+    DiseaseImmunityExpired {
         agent: AgentId,
     },
     ActionRejected {

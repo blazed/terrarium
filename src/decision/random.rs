@@ -2,8 +2,8 @@ use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
     sim::{
-        Business, DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, Offering,
-        ProposedAction, TownEventKind,
+        Business, DialogueTone, GoalKind, GoalTarget, HealthCondition, IntentionGoal,
+        ObservationTarget, Offering, ProposedAction, TownEventKind,
     },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -64,6 +64,37 @@ impl DecisionEngine for RandomDecisionEngine {
                     relationship_score(left).total_cmp(&relationship_score(right))
                 })
         };
+
+        if observation.action_affordances.can_use_medicine {
+            return Ok(ProposedAction::UseMedicine);
+        }
+        let medical_need = observation.self_description.injury
+            || observation
+                .self_description
+                .conditions
+                .contains(&HealthCondition::Sick);
+        if medical_need {
+            if observation.action_affordances.can_seek_treatment {
+                return Ok(ProposedAction::SeekTreatment);
+            }
+            if let Some(route) = observation.route_hints.treatment {
+                return Ok(follow_route(Some(route), IntentionGoal::SeekTreatment));
+            }
+        }
+        if observation.self_description.health < 0.25
+            && observation.action_affordances.can_use_repair_kit
+        {
+            return Ok(ProposedAction::UseRepairKit);
+        }
+        if observation.self_description.health < 0.25 {
+            return Ok(
+                if observation.current_location.id == observation.self_description.home.id {
+                    ProposedAction::Rest
+                } else {
+                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
+                },
+            );
+        }
 
         if observation
             .town_event
@@ -1026,6 +1057,49 @@ mod tests {
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn medical_needs_prioritize_medicine_and_clinic_treatment() {
+        let mut world = World::briar_glen(18).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        world.advance_to(Tick(8 * 12)).expect("clinic opening");
+        world.agents.get_mut(&actor).expect("resident").injury = true;
+        world.agents.get_mut(&actor).expect("resident").health = 0.4;
+        world.agents.get_mut(&actor).expect("resident").balance = 100;
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.inventory.medicine = 1;
+        observation.action_affordances.can_use_medicine = true;
+        assert_eq!(
+            RandomDecisionEngine::new(18)
+                .decide(&observation)
+                .await
+                .expect("medicine decision"),
+            ProposedAction::UseMedicine
+        );
+
+        observation.self_description.inventory.medicine = 0;
+        observation.action_affordances.can_use_medicine = false;
+        assert!(matches!(
+            RandomDecisionEngine::new(18)
+                .decide(&observation)
+                .await
+                .expect("clinic route decision"),
+            ProposedAction::Pursue {
+                intention: IntentionGoal::SeekTreatment
+            }
+        ));
+        let clinic = world.clinic_location().expect("clinic");
+        world.relocate(actor, clinic);
+        let observation = perceive(&world, actor).expect("clinic observation");
+        assert!(observation.action_affordances.can_seek_treatment);
+        assert_eq!(
+            RandomDecisionEngine::new(18)
+                .decide(&observation)
+                .await
+                .expect("treatment decision"),
+            ProposedAction::SeekTreatment
         );
     }
 }

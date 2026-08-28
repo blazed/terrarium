@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
-const CHECKPOINT_VERSION: i64 = 8;
+const CHECKPOINT_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
@@ -59,7 +59,7 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA user_version = 8;
+         PRAGMA user_version = 9;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
@@ -210,10 +210,16 @@ mod tests {
             .await
             .expect("simulation");
         let actor = *world.agents.keys().next().expect("resident");
-        world.agents.get_mut(&actor).expect("resident").intention = Some(Intention {
+        let actor = world.agents.get_mut(&actor).expect("resident");
+        actor.intention = Some(Intention {
             goal: IntentionGoal::Rest,
             expires_at: Tick(world.tick.0 + 10),
         });
+        actor.health = 0.73;
+        actor.injury = true;
+        actor.disease = crate::sim::DiseaseState::Incubating {
+            until: Tick(world.tick.0 + 10),
+        };
 
         save_world(&path, &world).expect("save");
         let stored = load_run(&path).expect("load");
@@ -251,7 +257,7 @@ mod tests {
         let mut continuous_engine = RandomDecisionEngine::new(seed);
         let continuous = run_simulation(
             World::briar_glen(seed).expect("town"),
-            100,
+            900,
             &mut continuous_engine,
         )
         .await
@@ -260,7 +266,7 @@ mod tests {
         let mut first_engine = RandomDecisionEngine::new(seed);
         let first = run_simulation(
             World::briar_glen(seed).expect("town"),
-            40,
+            400,
             &mut first_engine,
         )
         .await
@@ -268,7 +274,7 @@ mod tests {
         save_world(&path, &first).expect("checkpoint");
         let resumed = load_world(&path).expect("load checkpoint");
         let mut resumed_engine = RandomDecisionEngine::new(resumed.seed);
-        let resumed = run_simulation(resumed, 60, &mut resumed_engine)
+        let resumed = run_simulation(resumed, 500, &mut resumed_engine)
             .await
             .expect("resumed run");
 
@@ -289,11 +295,11 @@ mod tests {
 
         let connection = Connection::open(&path).expect("database");
         connection
-            .execute_batch("PRAGMA user_version = 9")
+            .execute_batch("PRAGMA user_version = 10")
             .expect("version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(9))
+            Err(PersistenceError::UnsupportedCheckpointVersion(10))
         ));
 
         connection
@@ -305,7 +311,7 @@ mod tests {
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 8; UPDATE world SET tick = '0'")
+            .execute_batch("PRAGMA user_version = 9; UPDATE world SET tick = '0'")
             .expect("corrupt checkpoint");
         assert!(matches!(
             load_world(&path),

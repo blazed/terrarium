@@ -12,8 +12,9 @@ pub use action::{
     ObservationTarget, ProposedAction,
 };
 pub use agent::{
-    Activity, ActivityKind, Agent, Belief, Goal, GoalKind, GoalTarget, Inventory, Item,
-    MAX_ITEMS_PER_KIND, Needs, Occupation, Personality, Rumor,
+    Activity, ActivityKind, Agent, Belief, DeathCause, DiseaseState, Goal, GoalKind, GoalTarget,
+    HealthCondition, Inventory, Item, LifeState, MAX_ITEMS_PER_KIND, Needs, Occupation,
+    Personality, Rumor,
 };
 pub use event::{ConfrontationOutcome, Event, EventKind};
 pub use location::{Business, Location, Offering, OpeningHours};

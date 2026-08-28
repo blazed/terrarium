@@ -24,6 +24,7 @@ pub enum Offering {
     Meal,
     Supplies,
     Repairs,
+    Medicine,
     CivicServices,
 }
 
@@ -33,6 +34,7 @@ impl Offering {
             Self::Meal => Some(Item::Meal),
             Self::Supplies => Some(Item::Supplies),
             Self::Repairs => Some(Item::RepairKit),
+            Self::Medicine => Some(Item::Medicine),
             Self::CivicServices => None,
         }
     }
@@ -58,6 +60,7 @@ impl std::fmt::Display for Offering {
             Self::Meal => "meal",
             Self::Supplies => "supplies",
             Self::Repairs => "repairs",
+            Self::Medicine => "medicine",
             Self::CivicServices => "civic services",
         })
     }

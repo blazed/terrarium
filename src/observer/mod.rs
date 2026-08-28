@@ -1,5 +1,6 @@
 use crate::sim::{
-    Agent, AgentId, Event, EventKind, IntentionGoal, LocationId, ObservationTarget, World,
+    Agent, AgentId, Event, EventKind, IntentionGoal, LifeState, LocationId, ObservationTarget,
+    World,
 };
 
 pub fn render_run(world: &World) -> String {
@@ -51,8 +52,14 @@ pub fn render_dashboard(world: &World) -> String {
             counts.rejected
         ),
         format!(
-            "Purchases: {} | Items used: {} | Rests: {} | Work: {} | Goals completed: {}",
-            counts.purchases, counts.items_used, counts.rests, counts.work, counts.goals
+            "Purchases: {} | Items used: {} | Treatments: {} | Rests: {} | Work: {} | Goals completed: {} | Deaths: {}",
+            counts.purchases,
+            counts.items_used,
+            counts.treatments,
+            counts.rests,
+            counts.work,
+            counts.goals,
+            counts.deaths
         ),
         String::new(),
         "RESIDENTS".into(),
@@ -60,10 +67,10 @@ pub fn render_dashboard(world: &World) -> String {
     let headers = [
         "Name",
         "Location",
-        "Activity",
+        "Activity / health",
         "$",
         "Mood",
-        "M/S/R",
+        "M/S/R/Med",
         "Needs % Mn/F/E/S/C/St",
         "Urgent",
         "Goal",
@@ -75,6 +82,7 @@ pub fn render_dashboard(world: &World) -> String {
     let rows = world
         .agents
         .values()
+        .filter(|agent| agent.is_alive())
         .map(|agent| {
             let goal = agent
                 .goals
@@ -89,18 +97,36 @@ pub fn render_dashboard(world: &World) -> String {
                 .map(|intention| intention_name(world, &intention.goal))
                 .unwrap_or_else(|| "—".into());
             let (urgent_need, urgent_value) = most_urgent_need(agent);
+            let conditions = agent
+                .health_conditions()
+                .into_iter()
+                .map(|condition| format!("{condition:?}").to_lowercase())
+                .collect::<Vec<_>>()
+                .join("+");
+            let conditions = if conditions.is_empty() {
+                "healthy".into()
+            } else {
+                conditions
+            };
             [
                 agent.name.clone(),
                 location_name(world, agent.location),
-                agent
-                    .activity
-                    .map(|activity| format!("{:?}", activity.kind))
-                    .unwrap_or_else(|| "Idle".into()),
+                format!(
+                    "{} · hp {}% · {conditions}",
+                    agent
+                        .activity
+                        .map(|activity| format!("{:?}", activity.kind))
+                        .unwrap_or_else(|| "Idle".into()),
+                    (agent.health * 100.0).round() as u8,
+                ),
                 agent.balance.to_string(),
                 format!("{:+.2}", agent.mood),
                 format!(
-                    "{}/{}/{}",
-                    agent.inventory.meals, agent.inventory.supplies, agent.inventory.repair_kits
+                    "{}/{}/{}/{}",
+                    agent.inventory.meals,
+                    agent.inventory.supplies,
+                    agent.inventory.repair_kits,
+                    agent.inventory.medicine
                 ),
                 format!(
                     "{}/{}/{}/{}/{}/{}",
@@ -162,6 +188,25 @@ pub fn render_dashboard(world: &World) -> String {
     lines.push(render_row(&headers));
     lines.extend(rows.iter().map(render_row));
 
+    let deceased = world
+        .agents
+        .values()
+        .filter_map(|agent| match agent.life {
+            LifeState::Dead { tick, cause } => Some(format!(
+                "{} — died from {} at {} in {}",
+                agent.name,
+                cause,
+                tick,
+                location_name(world, agent.location)
+            )),
+            LifeState::Alive => None,
+        })
+        .collect::<Vec<_>>();
+    if !deceased.is_empty() {
+        lines.extend([String::new(), "DECEASED".into()]);
+        lines.extend(deceased);
+    }
+
     lines.extend([
         String::new(),
         "BUSINESSES".into(),
@@ -202,6 +247,8 @@ struct EventCounts {
     rests: usize,
     work: usize,
     goals: usize,
+    deaths: usize,
+    treatments: usize,
     rejected: usize,
 }
 
@@ -218,8 +265,14 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Rested { .. } => counts.rests += 1,
             EventKind::Worked { .. } => counts.work += 1,
             EventKind::GoalCompleted { .. } => counts.goals += 1,
+            EventKind::Died { .. } => counts.deaths += 1,
+            EventKind::Treated { .. } => counts.treatments += 1,
             EventKind::ActionRejected { .. } => counts.rejected += 1,
-            EventKind::TownEventStarted { .. }
+            EventKind::DiseaseInfected { .. }
+            | EventKind::DiseaseSymptoms { .. }
+            | EventKind::DiseaseRecovered { .. }
+            | EventKind::DiseaseImmunityExpired { .. }
+            | EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::Observed { .. }
             | EventKind::Waited { .. } => {}
@@ -242,6 +295,8 @@ pub fn render_summary(world: &World) -> String {
         format!("Rests: {}", counts.rests),
         format!("Work: {}", counts.work),
         format!("Goals completed: {}", counts.goals),
+        format!("Treatments: {}", counts.treatments),
+        format!("Deaths: {}", counts.deaths),
         format!("Rejected actions: {}", counts.rejected),
     ]
     .join("\n")
@@ -296,6 +351,10 @@ pub fn render_event(world: &World, event: &Event) -> String {
         EventKind::ItemUsed { agent, item } => {
             format!("{time}  {} used a {item}", agent_name(world, *agent))
         }
+        EventKind::Treated { agent, cost } => format!(
+            "{time}  {} received treatment for {cost} coins",
+            agent_name(world, *agent)
+        ),
         EventKind::Rested { agent } => format!("{time}  {} rested", agent_name(world, *agent)),
         EventKind::Worked {
             agent,
@@ -315,6 +374,28 @@ pub fn render_event(world: &World, event: &Event) -> String {
             agent_name(world, *agent)
         ),
         EventKind::Waited { agent } => format!("{time}  {} waited", agent_name(world, *agent)),
+        EventKind::Died { agent, cause } => {
+            format!("{time}  {} died from {cause}", agent_name(world, *agent))
+        }
+        EventKind::DiseaseInfected { agent, source } => format!(
+            "{time}  {} became infected{}",
+            agent_name(world, *agent),
+            source
+                .map(|source| format!(" after contact with {}", agent_name(world, source)))
+                .unwrap_or_default()
+        ),
+        EventKind::DiseaseSymptoms { agent } => format!(
+            "{time}  {} developed Briar fever symptoms",
+            agent_name(world, *agent)
+        ),
+        EventKind::DiseaseRecovered { agent } => format!(
+            "{time}  {} started recovering from Briar fever",
+            agent_name(world, *agent)
+        ),
+        EventKind::DiseaseImmunityExpired { agent } => format!(
+            "{time}  {}'s Briar fever immunity expired",
+            agent_name(world, *agent)
+        ),
         EventKind::ActionRejected { agent, reason } => format!(
             "{time}  {}'s action was rejected: {reason}",
             agent_name(world, *agent)
@@ -357,6 +438,7 @@ fn intention_name(world: &World, goal: &IntentionGoal) -> String {
         }
         IntentionGoal::Rest => "rest".into(),
         IntentionGoal::Work => "work".into(),
+        IntentionGoal::SeekTreatment => "seek treatment".into(),
         IntentionGoal::Talk { target, .. } => format!("talk to {}", agent_name(world, *target)),
     }
 }

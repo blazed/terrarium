@@ -6,13 +6,18 @@ pub struct Scheduler;
 
 impl Scheduler {
     pub fn agents_to_act(self, world: &World) -> Vec<AgentId> {
-        if world.agents.is_empty() {
-            return Vec::new();
-        }
-        world
+        let alive = world
             .agents
             .values()
-            .nth(world.tick.0 as usize % world.agents.len())
+            .filter(|agent| agent.is_alive())
+            .collect::<Vec<_>>();
+        if alive.is_empty() {
+            return Vec::new();
+        }
+        let alive_count = alive.len();
+        alive
+            .into_iter()
+            .nth(world.tick.0 as usize % alive_count)
             .filter(|agent| agent.activity.is_none())
             .map(|agent| agent.id)
             .into_iter()

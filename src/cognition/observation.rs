@@ -1,7 +1,7 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, Intention, Inventory,
-    LocationId, Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality,
-    Relationship, Tick, TownEventKind, World, event_evidence,
+    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, HealthCondition,
+    Intention, Inventory, LifeState, LocationId, Needs, ObservationTarget, Occupation, Offering,
+    OpeningHours, Personality, Relationship, Tick, TownEventKind, World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +55,8 @@ pub struct ActionAffordances {
     pub can_consume_meal: bool,
     pub can_use_supplies: bool,
     pub can_use_repair_kit: bool,
+    pub can_use_medicine: bool,
+    pub can_seek_treatment: bool,
     pub can_rest: bool,
     pub can_work: bool,
 }
@@ -71,6 +73,7 @@ pub struct RouteHints {
     pub home: Option<RouteHint>,
     pub workplace: Option<RouteHint>,
     pub purchase: Option<RouteHint>,
+    pub treatment: Option<RouteHint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +98,10 @@ pub struct SelfDescription {
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub mood: f32,
+    pub health: f32,
+    pub injury: bool,
+    pub conditions: Vec<HealthCondition>,
+    pub life: LifeState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +129,7 @@ pub struct VisibleAgent {
     pub name: String,
     pub occupation: Occupation,
     pub activity: Option<Activity>,
+    pub conditions: Vec<HealthCondition>,
     pub relationship: Relationship,
 }
 
@@ -131,6 +139,8 @@ pub enum ObservationError {
     UnknownAgent(AgentId),
     #[error("observer is at unknown location {0}")]
     UnknownLocation(LocationId),
+    #[error("observer {0} is dead")]
+    AgentDead(AgentId),
     #[error("location contains unknown agent {0}")]
     InvalidVisibleAgent(AgentId),
 }
@@ -140,6 +150,9 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         .agents
         .get(&observer)
         .ok_or(ObservationError::UnknownAgent(observer))?;
+    if !agent.is_alive() {
+        return Err(ObservationError::AgentDead(observer));
+    }
     let location = world
         .locations
         .get(&agent.location)
@@ -168,7 +181,13 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
     let visible_agents = location
         .agents
         .iter()
-        .filter(|id| **id != observer)
+        .filter(|id| {
+            **id != observer
+                && world
+                    .agents
+                    .get(id)
+                    .is_none_or(|visible| visible.is_alive())
+        })
         .map(|id| {
             let visible = world
                 .agents
@@ -179,6 +198,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 name: visible.name.clone(),
                 occupation: visible.occupation.clone(),
                 activity: visible.activity,
+                conditions: visible.health_conditions(),
                 relationship: agent
                     .relationships
                     .get(id)
@@ -226,8 +246,19 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         can_consume_meal: agent.inventory.meals > 0,
         can_use_supplies: agent.inventory.supplies > 0,
         can_use_repair_kit: agent.inventory.repair_kits > 0,
+        can_use_medicine: agent.inventory.medicine > 0
+            && (agent.injury || agent.disease.is_symptomatic()),
+        can_seek_treatment: location.business.is_some_and(|business| {
+            business.offering == Offering::Medicine
+                && world.is_location_open(location.id)
+                && business.stock > 0
+                && agent.balance >= business.price
+                && (agent.injury || agent.disease.is_symptomatic())
+        }),
         can_rest: location.id == agent.home,
         can_work: agent.workplace == Some(location.id)
+            && agent.health >= 0.2
+            && !agent.injury
             && world.is_location_open(location.id)
             && location.business.is_some_and(Business::solvent),
     };
@@ -276,6 +307,26 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 .map(|candidate| candidate.id)
                 .collect(),
         ),
+        treatment: if (agent.injury || agent.disease.is_symptomatic())
+            && agent.balance
+                >= world
+                    .clinic_location()
+                    .and_then(|clinic| world.locations.get(&clinic))
+                    .and_then(|location| location.business)
+                    .map_or(u64::MAX, |business| business.price)
+        {
+            world
+                .clinic_location()
+                .filter(|clinic| {
+                    world.is_location_open(*clinic)
+                        && world.locations[clinic]
+                            .business
+                            .is_some_and(|business| business.stock > 0)
+                })
+                .and_then(|clinic| next_hop(world, location.id, BTreeSet::from([clinic])))
+        } else {
+            None
+        },
     };
 
     Ok(AgentObservation {
@@ -303,6 +354,10 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             activity: agent.activity,
             intention: agent.intention.clone(),
             mood: agent.mood,
+            health: agent.health,
+            injury: agent.injury,
+            conditions: agent.health_conditions(),
+            life: agent.life,
         },
         current_location: LocationDescription {
             id: location.id,
@@ -468,6 +523,15 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
         EventKind::ItemUsed { agent, item } => {
             format!("{} used a {item}.", agent_name(*agent))
         }
+        EventKind::Treated { agent, cost } if *agent == observer => {
+            format!("You received treatment for {cost} coins.")
+        }
+        EventKind::Treated { agent, cost } => {
+            format!(
+                "{} received treatment for {cost} coins.",
+                agent_name(*agent)
+            )
+        }
         EventKind::Rested { agent } if *agent == observer => "You rested.".into(),
         EventKind::Rested { agent } => format!("{} rested.", agent_name(*agent)),
         EventKind::Worked {
@@ -495,6 +559,31 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
         }
         EventKind::Waited { agent } if *agent == observer => "You waited.".into(),
         EventKind::Waited { agent } => format!("{} waited.", agent_name(*agent)),
+        EventKind::Died { agent, cause } => {
+            format!("{} died from {cause}.", agent_name(*agent))
+        }
+        EventKind::DiseaseInfected { .. } => "Someone became infected.".into(),
+        EventKind::DiseaseSymptoms { agent } if *agent == observer => {
+            "You developed Briar fever symptoms.".into()
+        }
+        EventKind::DiseaseSymptoms { agent } => {
+            format!("{} developed Briar fever symptoms.", agent_name(*agent))
+        }
+        EventKind::DiseaseRecovered { agent } if *agent == observer => {
+            "You started recovering from Briar fever.".into()
+        }
+        EventKind::DiseaseRecovered { agent } => {
+            format!(
+                "{} started recovering from Briar fever.",
+                agent_name(*agent)
+            )
+        }
+        EventKind::DiseaseImmunityExpired { agent } if *agent == observer => {
+            "Your Briar fever immunity expired.".into()
+        }
+        EventKind::DiseaseImmunityExpired { agent } => {
+            format!("{}'s Briar fever immunity expired.", agent_name(*agent))
+        }
         EventKind::ActionRejected { agent, .. } if *agent == observer => {
             "Your attempted action was rejected.".into()
         }
@@ -517,9 +606,9 @@ fn produced_stock(amount: u32) -> String {
 mod tests {
     use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
-        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, Intention,
-        IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick,
-        TownEventKind, World,
+        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, DiseaseState,
+        EventKind, HealthCondition, Intention, IntentionGoal, ObservationTarget, OpeningHours,
+        ProposedAction, Relationship, Rumor, Tick, TownEventKind, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -1079,6 +1168,65 @@ mod tests {
                 .connected
                 .iter()
                 .all(|location| location.is_open == world.is_location_open(location.id))
+        );
+    }
+
+    #[test]
+    fn observations_expose_only_visible_health_conditions() {
+        let mut world = World::briar_glen(13).expect("town");
+        let observer = *world.agents.keys().next().expect("resident");
+        let location = world.agents[&observer].location;
+        let visible = world.locations[&location]
+            .agents
+            .iter()
+            .find(|id| **id != observer)
+            .copied()
+            .expect("visible resident");
+        let observer_agent = world.agents.get_mut(&observer).expect("observer");
+        observer_agent.needs.food = 1.0;
+        observer_agent.needs.energy = 0.0;
+        observer_agent.injury = false;
+        let visible_agent = world.agents.get_mut(&visible).expect("visible resident");
+        visible_agent.needs.food = 0.0;
+        visible_agent.needs.energy = 1.0;
+        visible_agent.injury = true;
+        visible_agent.disease = DiseaseState::Incubating {
+            until: Tick(world.tick.0 + 10),
+        };
+
+        let observation = perceive(&world, observer).expect("observation");
+        assert_eq!(
+            observation.self_description.conditions,
+            vec![HealthCondition::Exhausted]
+        );
+        let visible_agent = observation
+            .visible_agents
+            .iter()
+            .find(|agent| agent.id == visible)
+            .expect("visible resident");
+        assert_eq!(
+            visible_agent.conditions,
+            vec![HealthCondition::Hungry, HealthCondition::Injured]
+        );
+        world
+            .agents
+            .get_mut(&visible)
+            .expect("visible resident")
+            .disease = DiseaseState::Symptomatic {
+            until: Tick(world.tick.0 + 10),
+        };
+        let observation = perceive(&world, observer).expect("symptom observation");
+        let visible_agent = observation
+            .visible_agents
+            .iter()
+            .find(|agent| agent.id == visible)
+            .expect("visible resident");
+        assert!(visible_agent.conditions.contains(&HealthCondition::Sick));
+        assert!(
+            serde_json::to_value(visible_agent)
+                .expect("visible JSON")
+                .get("health")
+                .is_none()
         );
     }
 

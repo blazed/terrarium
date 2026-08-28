@@ -2,12 +2,69 @@ use super::{AgentId, Event, EventKind, Intention, LocationId, Relationship, Tick
 
 pub const MAX_ITEMS_PER_KIND: u8 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathCause {
+    Starvation,
+    Exhaustion,
+    Injury,
+    Disease,
+}
+
+impl std::fmt::Display for DeathCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Starvation => "starvation",
+            Self::Exhaustion => "exhaustion",
+            Self::Injury => "injury",
+            Self::Disease => "disease",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LifeState {
+    Alive,
+    Dead { tick: Tick, cause: DeathCause },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCondition {
+    Hungry,
+    Exhausted,
+    Injured,
+    Sick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum DiseaseState {
+    Susceptible,
+    Incubating { until: Tick },
+    Symptomatic { until: Tick },
+    Recovering { until: Tick },
+    Immune { until: Tick },
+}
+
+impl DiseaseState {
+    pub fn is_symptomatic(self) -> bool {
+        matches!(self, Self::Symptomatic { .. })
+    }
+
+    pub fn is_infected(self) -> bool {
+        !matches!(self, Self::Susceptible)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Item {
     Meal,
     Supplies,
     RepairKit,
+    Medicine,
 }
 
 impl std::fmt::Display for Item {
@@ -16,6 +73,7 @@ impl std::fmt::Display for Item {
             Self::Meal => "meal",
             Self::Supplies => "supply pack",
             Self::RepairKit => "repair kit",
+            Self::Medicine => "medicine",
         })
     }
 }
@@ -25,6 +83,7 @@ pub struct Inventory {
     pub meals: u8,
     pub supplies: u8,
     pub repair_kits: u8,
+    pub medicine: u8,
 }
 
 impl Inventory {
@@ -33,6 +92,7 @@ impl Inventory {
             Item::Meal => self.meals,
             Item::Supplies => self.supplies,
             Item::RepairKit => self.repair_kits,
+            Item::Medicine => self.medicine,
         }
     }
 
@@ -41,7 +101,7 @@ impl Inventory {
     }
 
     pub fn is_valid(self) -> bool {
-        [self.meals, self.supplies, self.repair_kits]
+        [self.meals, self.supplies, self.repair_kits, self.medicine]
             .into_iter()
             .all(|count| count <= MAX_ITEMS_PER_KIND)
     }
@@ -61,6 +121,7 @@ impl Inventory {
             Item::Meal => &mut self.meals,
             Item::Supplies => &mut self.supplies,
             Item::RepairKit => &mut self.repair_kits,
+            Item::Medicine => &mut self.medicine,
         }
     }
 }
@@ -77,6 +138,7 @@ pub enum Occupation {
     Sheriff,
     Publican,
     Clerk,
+    Doctor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +303,7 @@ pub enum ActivityKind {
     Observing,
     Shopping,
     UsingItem,
+    Treating,
     Resting,
     Working,
     Waiting,
@@ -260,12 +323,18 @@ impl Activity {
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
             EventKind::Purchased { .. } => (ActivityKind::Shopping, 3),
             EventKind::ItemUsed { .. } => (ActivityKind::UsingItem, 1),
+            EventKind::Treated { .. } => (ActivityKind::Treating, 6),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
             EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::GoalCompleted { .. }
+            | EventKind::Died { .. }
+            | EventKind::DiseaseInfected { .. }
+            | EventKind::DiseaseSymptoms { .. }
+            | EventKind::DiseaseRecovered { .. }
+            | EventKind::DiseaseImmunityExpired { .. }
             | EventKind::ActionRejected { .. } => return None,
         };
         Some(Self {
@@ -286,6 +355,10 @@ pub struct Agent {
     pub location: LocationId,
     pub personality: Personality,
     pub needs: Needs,
+    pub health: f32,
+    pub injury: bool,
+    pub disease: DiseaseState,
+    pub life: LifeState,
     pub balance: u64,
     #[serde(default)]
     pub inventory: Inventory,
@@ -305,6 +378,35 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn is_alive(&self) -> bool {
+        matches!(self.life, LifeState::Alive)
+    }
+
+    pub fn is_hungry(&self) -> bool {
+        self.needs.food < 0.1
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.needs.energy < 0.1
+    }
+
+    pub fn health_conditions(&self) -> Vec<HealthCondition> {
+        let mut conditions = Vec::new();
+        if self.is_hungry() {
+            conditions.push(HealthCondition::Hungry);
+        }
+        if self.is_exhausted() {
+            conditions.push(HealthCondition::Exhausted);
+        }
+        if self.injury {
+            conditions.push(HealthCondition::Injured);
+        }
+        if self.disease.is_symptomatic() {
+            conditions.push(HealthCondition::Sick);
+        }
+        conditions
+    }
+
     pub(super) fn decay_mood(&mut self, ticks: u64) {
         let decay = 0.002 * ticks as f32;
         self.mood = if self.mood > 0.0 {
