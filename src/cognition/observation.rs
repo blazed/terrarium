@@ -1,7 +1,7 @@
 use crate::sim::{
     Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, Intention, LocationId,
     Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, Relationship, Tick,
-    World, event_evidence,
+    TownEventKind, World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,7 @@ use thiserror::Error;
 pub struct AgentObservation {
     pub tick: Tick,
     pub local_time: LocalTime,
+    pub town_event: Option<TownEventObservation>,
     pub self_description: SelfDescription,
     pub current_location: LocationDescription,
     pub visible_agents: Vec<VisibleAgent>,
@@ -20,6 +21,12 @@ pub struct AgentObservation {
     pub relevant_memories: Vec<String>,
     pub rumors: Vec<RumorSummary>,
     pub beliefs: BTreeMap<AgentId, Belief>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TownEventObservation {
+    pub kind: TownEventKind,
+    pub remaining_ticks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,7 +151,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             name: location.name.clone(),
             business: location.business,
             opening_hours: location.opening_hours,
-            is_open: location.is_open(world.tick.hour()),
+            is_open: world.is_location_open(location.id),
         })
     };
     let home = summarize_location(agent.home)?;
@@ -204,13 +211,13 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             })
             .collect(),
         can_purchase: location.business.is_some_and(|business| {
-            location.is_open(world.tick.hour())
+            world.is_location_open(location.id)
                 && business.stock > 0
                 && agent.balance >= business.price
         }),
         can_rest: location.id == agent.home,
         can_work: agent.workplace == Some(location.id)
-            && location.is_open(world.tick.hour())
+            && world.is_location_open(location.id)
             && location.business.is_some_and(Business::solvent),
     };
     let desired_offering = Offering::desired(&agent.needs);
@@ -231,7 +238,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 .filter(|candidate| {
                     candidate.business.is_some_and(|business| {
                         desired_offering.is_none_or(|offering| business.offering == offering)
-                            && candidate.is_open(world.tick.hour())
+                            && world.is_location_open(candidate.id)
                             && business.stock > 0
                             && agent.balance >= business.price
                     })
@@ -248,6 +255,10 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             hour: world.tick.hour(),
             minute: world.tick.minute(),
         },
+        town_event: world.active_town_event.map(|event| TownEventObservation {
+            kind: event.kind,
+            remaining_ticks: event.ends_at.0 - world.tick.0,
+        }),
         self_description: SelfDescription {
             id: agent.id,
             name: agent.name.clone(),
@@ -267,7 +278,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             name: location.name.clone(),
             business: location.business,
             opening_hours: location.opening_hours,
-            is_open: location.is_open(world.tick.hour()),
+            is_open: world.is_location_open(location.id),
             connected,
         },
         visible_agents,
@@ -324,6 +335,10 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             .map_or_else(|| id.to_string(), |location| location.name.clone())
     };
     let description = match &event.kind {
+        EventKind::TownEventStarted { kind, ends_at } => {
+            format!("The {kind} began and will last until {ends_at}.")
+        }
+        EventKind::TownEventEnded { kind } => format!("The {kind} ended."),
         EventKind::Moved { agent, from, to } if *agent == observer => format!(
             "You moved from {} to {}.",
             location_name(*from),
@@ -467,7 +482,7 @@ mod tests {
     use crate::sim::{
         ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, Intention,
         IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick,
-        World,
+        TownEventKind, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -984,6 +999,27 @@ mod tests {
                 .expect("outsider")
                 .rumors
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn observations_expose_active_town_events_and_storm_closures() {
+        let mut world = World::briar_glen(0).expect("town");
+        world
+            .advance_to(Tick(8 * 60 / Tick::MINUTES))
+            .expect("storm");
+        let observer = *world.agents.keys().next().expect("resident");
+        let observation = perceive(&world, observer).expect("observation");
+
+        let event = observation.town_event.expect("town event");
+        assert_eq!(event.kind, TownEventKind::Storm);
+        assert_eq!(event.remaining_ticks, 72);
+        assert!(
+            observation
+                .current_location
+                .connected
+                .iter()
+                .all(|location| location.is_open == world.is_location_open(location.id))
         );
     }
 

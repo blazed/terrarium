@@ -196,7 +196,10 @@ impl Activity {
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
-            EventKind::GoalCompleted { .. } | EventKind::ActionRejected { .. } => return None,
+            EventKind::TownEventStarted { .. }
+            | EventKind::TownEventEnded { .. }
+            | EventKind::GoalCompleted { .. }
+            | EventKind::ActionRejected { .. } => return None,
         };
         Some(Self {
             kind,

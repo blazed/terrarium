@@ -1,5 +1,6 @@
 use super::{
     ActionRejection, AgentId, DialogueTone, EventId, LocationId, ObservationTarget, Offering, Tick,
+    TownEventKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,13 @@ impl std::fmt::Display for ConfrontationOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
+    TownEventStarted {
+        kind: TownEventKind,
+        ends_at: Tick,
+    },
+    TownEventEnded {
+        kind: TownEventKind,
+    },
     Moved {
         agent: AgentId,
         from: LocationId,

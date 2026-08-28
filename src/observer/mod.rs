@@ -29,8 +29,19 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
 
 pub fn render_dashboard(world: &World) -> String {
     let counts = event_counts(world);
+    let town_event = world.active_town_event.map_or_else(
+        || "Town event: none".into(),
+        |event| {
+            format!(
+                "Town event: {} ({} ticks remaining)",
+                event.kind,
+                event.ends_at.0 - world.tick.0
+            )
+        },
+    );
     let mut lines = vec![
         format!("=== {} — {} ===", world.name, world.tick),
+        town_event,
         format!(
             "Events: {} | Moves: {} | Talks: {} | Confrontations: {} | Rejected: {}",
             world.events().len(),
@@ -149,7 +160,10 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Worked { .. } => counts.work += 1,
             EventKind::GoalCompleted { .. } => counts.goals += 1,
             EventKind::ActionRejected { .. } => counts.rejected += 1,
-            EventKind::Observed { .. } | EventKind::Waited { .. } => {}
+            EventKind::TownEventStarted { .. }
+            | EventKind::TownEventEnded { .. }
+            | EventKind::Observed { .. }
+            | EventKind::Waited { .. } => {}
         }
     }
     counts
@@ -176,6 +190,10 @@ pub fn render_summary(world: &World) -> String {
 pub fn render_event(world: &World, event: &Event) -> String {
     let time = format!("{:02}:{:02}", event.tick.hour(), event.tick.minute());
     match &event.kind {
+        EventKind::TownEventStarted { kind, ends_at } => {
+            format!("{time}  The {kind} began (until {ends_at})")
+        }
+        EventKind::TownEventEnded { kind } => format!("{time}  The {kind} ended"),
         EventKind::Moved { agent, to, .. } => format!(
             "{time}  {} entered {}",
             agent_name(world, *agent),
@@ -314,7 +332,23 @@ fn location_name(world: &World, id: LocationId) -> String {
 #[cfg(test)]
 mod tests {
     use super::{render_dashboard, render_event, render_run, render_run_since};
-    use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
+    use crate::{
+        decision::RandomDecisionEngine,
+        runner::run_simulation,
+        sim::{Tick, World},
+    };
+
+    #[test]
+    fn dashboard_renders_active_town_events() {
+        let mut world = World::briar_glen(0).expect("town");
+        world
+            .advance_to(Tick(8 * 60 / Tick::MINUTES))
+            .expect("storm");
+        assert!(render_dashboard(&world).contains("Town event: storm (72 ticks remaining)"));
+        assert!(
+            render_event(&world, world.events().last().expect("start")).contains("storm began")
+        );
+    }
 
     #[tokio::test]
     async fn rendering_is_deterministic_and_readable() {

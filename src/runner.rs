@@ -30,7 +30,11 @@ pub async fn run_simulation_with_events(
 ) -> Result<World, SimulationError> {
     let scheduler = Scheduler;
     for _ in 0..ticks {
+        let previous_events = world.events().len();
         world.advance_tick()?;
+        for event in &world.events()[previous_events..] {
+            on_event(&world, event);
+        }
         for agent in scheduler.agents_to_act(&world) {
             let previous_events = world.events().len();
             if world.continue_intention(agent).is_none() {
