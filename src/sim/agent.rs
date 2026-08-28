@@ -352,6 +352,10 @@ pub struct RoutingStats {
     pub local_decisions: u64,
     pub llm_decisions: u64,
     pub llm_fallbacks: u64,
+    pub llm_intentions_started: u64,
+    pub llm_intention_steps: u64,
+    pub llm_intentions_completed: u64,
+    pub llm_intentions_interrupted: u64,
 }
 
 impl RoutingStats {
@@ -409,6 +413,7 @@ pub struct Agent {
     #[serde(default)]
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
+    pub llm_intention: bool,
     #[serde(default)]
     pub mood: f32,
     pub relationships: BTreeMap<AgentId, Relationship>,

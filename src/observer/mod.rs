@@ -31,6 +31,7 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
 pub fn render_dashboard(world: &World) -> String {
     let counts = event_counts(world);
     let (local, attempts, llm, fallbacks) = routing_counts(world);
+    let (intentions, steps, completed, interrupted) = intention_counts(world);
     let town_event = world.active_town_event.map_or_else(
         || "Town event: none".into(),
         |event| {
@@ -64,6 +65,9 @@ pub fn render_dashboard(world: &World) -> String {
         ),
         format!(
             "Local decisions: {local} | LLM attempts: {attempts} | LLM decisions: {llm} | LLM fallbacks: {fallbacks}"
+        ),
+        format!(
+            "LLM intentions: {intentions} | Local steps: {steps} | Completed: {completed} | Interrupted: {interrupted}"
         ),
         String::new(),
         "RESIDENTS".into(),
@@ -285,6 +289,23 @@ fn event_counts(world: &World) -> EventCounts {
     counts
 }
 
+fn intention_counts(world: &World) -> (u64, u64, u64, u64) {
+    world.agents.values().fold((0, 0, 0, 0), |counts, agent| {
+        (
+            counts
+                .0
+                .saturating_add(agent.routing.llm_intentions_started),
+            counts.1.saturating_add(agent.routing.llm_intention_steps),
+            counts
+                .2
+                .saturating_add(agent.routing.llm_intentions_completed),
+            counts
+                .3
+                .saturating_add(agent.routing.llm_intentions_interrupted),
+        )
+    })
+}
+
 fn routing_counts(world: &World) -> (u64, u64, u64, u64) {
     world.agents.values().fold((0, 0, 0, 0), |counts, agent| {
         (
@@ -302,6 +323,7 @@ fn routing_counts(world: &World) -> (u64, u64, u64, u64) {
 pub fn render_summary(world: &World) -> String {
     let counts = event_counts(world);
     let (local, attempts, llm, fallbacks) = routing_counts(world);
+    let (intentions, steps, completed, interrupted) = intention_counts(world);
     [
         "=== RUN SUMMARY ===".into(),
         format!("Elapsed: {}", world.tick),
@@ -321,6 +343,10 @@ pub fn render_summary(world: &World) -> String {
         format!("LLM attempts: {attempts}"),
         format!("LLM decisions: {llm}"),
         format!("LLM fallbacks: {fallbacks}"),
+        format!("LLM intentions started: {intentions}"),
+        format!("Local intention steps: {steps}"),
+        format!("LLM intentions completed: {completed}"),
+        format!("LLM intentions interrupted: {interrupted}"),
     ]
     .join("\n")
 }
@@ -463,6 +489,10 @@ fn intention_name(world: &World, goal: &IntentionGoal) -> String {
         IntentionGoal::Work => "work".into(),
         IntentionGoal::SeekTreatment => "seek treatment".into(),
         IntentionGoal::Talk { target, .. } => format!("talk to {}", agent_name(world, *target)),
+        IntentionGoal::Observe { target } => format!("observe {}", target_name(world, target)),
+        IntentionGoal::Confront { target, .. } => {
+            format!("confront {}", agent_name(world, *target))
+        }
     }
 }
 

@@ -51,12 +51,55 @@ impl<L: DecisionEngine + Send, E: DecisionEngine + Send> DecisionEngine
             return Ok(Decision::local(local.action));
         }
         match self.llm.decide(observation).await {
-            Ok(decision) => Ok(Decision::llm(decision.action)),
+            Ok(decision) => match durable_intention(observation, decision.action) {
+                Some(intention) => Ok(Decision::llm(ProposedAction::Pursue { intention })),
+                None => {
+                    warn!("LLM returned no durable objective; using local proposal");
+                    Ok(Decision::llm_fallback(local.action))
+                }
+            },
             Err(error) => {
                 warn!(%error, "LLM decision failed; using local proposal");
                 Ok(Decision::llm_fallback(local.action))
             }
         }
+    }
+}
+
+fn durable_intention(
+    observation: &AgentObservation,
+    action: ProposedAction,
+) -> Option<IntentionGoal> {
+    match action {
+        ProposedAction::Pursue { intention } => Some(intention),
+        ProposedAction::Move { destination } => Some(IntentionGoal::Visit { destination }),
+        ProposedAction::Talk {
+            target,
+            tone,
+            message,
+        } => Some(IntentionGoal::Talk {
+            target,
+            tone,
+            message,
+        }),
+        ProposedAction::Confront { target, claim } => {
+            Some(IntentionGoal::Confront { target, claim })
+        }
+        ProposedAction::Observe { target } => Some(IntentionGoal::Observe { target }),
+        ProposedAction::Purchase => Some(IntentionGoal::Purchase {
+            destination: observation
+                .route_hints
+                .purchase
+                .map_or(observation.current_location.id, |route| route.destination),
+        }),
+        ProposedAction::SeekTreatment => Some(IntentionGoal::SeekTreatment),
+        ProposedAction::Rest => Some(IntentionGoal::Rest),
+        ProposedAction::Work => Some(IntentionGoal::Work),
+        ProposedAction::ConsumeMeal
+        | ProposedAction::UseSupplies
+        | ProposedAction::UseRepairKit
+        | ProposedAction::UseMedicine
+        | ProposedAction::Wait => None,
     }
 }
 
@@ -81,7 +124,9 @@ mod tests {
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
         persistence::{load_world, save_world},
         runner::run_simulation,
-        sim::{Decision, DecisionSource, ObservationTarget, ProposedAction, Tick, World},
+        sim::{
+            Decision, DecisionSource, IntentionGoal, ObservationTarget, ProposedAction, Tick, World,
+        },
     };
     use std::{
         fs,
@@ -172,7 +217,14 @@ mod tests {
         let mut observation = observation();
 
         let decision = engine.decide(&observation).await.expect("first decision");
-        assert_eq!(decision.action, llm_action);
+        assert_eq!(
+            decision.action,
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Observe {
+                    target: ObservationTarget::Location(observation.current_location.id),
+                },
+            }
+        );
         assert_eq!(decision.source, DecisionSource::Llm);
 
         observation.self_description.routing.llm_calls_today = 1;
@@ -198,6 +250,67 @@ mod tests {
             DecisionSource::Local
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn local_steps_continue_without_more_llm_calls() {
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let llm_calls = Arc::new(AtomicUsize::new(0));
+        let mut engine = HybridDecisionEngine::new(
+            FixedEngine {
+                action: ProposedAction::Wait,
+                calls: local_calls,
+                fails: false,
+            },
+            FixedEngine {
+                action: ProposedAction::Rest,
+                calls: llm_calls.clone(),
+                fails: false,
+            },
+            u8::MAX,
+        )
+        .expect("hybrid engine");
+        let mut world = World::briar_glen(7).expect("town");
+        let homes = world
+            .agents
+            .values()
+            .map(|agent| (agent.id, agent.location, agent.home))
+            .collect::<Vec<_>>();
+        for (agent, location, home) in homes {
+            world
+                .locations
+                .get_mut(&location)
+                .expect("location")
+                .agents
+                .remove(&agent);
+            world
+                .locations
+                .get_mut(&home)
+                .expect("home")
+                .agents
+                .insert(agent);
+            let resident = world.agents.get_mut(&agent).expect("resident");
+            resident.location = home;
+            resident.needs.energy = 0.0;
+            resident.needs.food = 1.0;
+            resident.needs.safety = 1.0;
+            resident.health = 1.0;
+            resident.injury = false;
+        }
+
+        let world = run_simulation(world, 24, &mut engine)
+            .await
+            .expect("simulation");
+
+        assert_eq!(llm_calls.load(Ordering::Relaxed), world.agents.len());
+        assert!(
+            world
+                .agents
+                .values()
+                .map(|agent| agent.routing.llm_intention_steps)
+                .sum::<u64>()
+                > 0
+        );
     }
 
     #[tokio::test]
@@ -233,7 +346,7 @@ mod tests {
             HybridDecisionEngine::new(
                 RandomDecisionEngine::new(11),
                 FixedEngine {
-                    action: ProposedAction::Wait,
+                    action: ProposedAction::Rest,
                     calls,
                     fails: false,
                 },

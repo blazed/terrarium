@@ -48,6 +48,13 @@ pub enum IntentionGoal {
         tone: DialogueTone,
         message: String,
     },
+    Observe {
+        target: ObservationTarget,
+    },
+    Confront {
+        target: AgentId,
+        claim: super::EventId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
