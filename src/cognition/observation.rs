@@ -1,7 +1,7 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Event, EventId, EventKind, Goal, Intention, LocationId, Needs,
-    ObservationTarget, Occupation, OpeningHours, Personality, Relationship, Tick, World,
-    event_evidence,
+    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, Intention, LocationId,
+    Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, Relationship, Tick,
+    World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -44,7 +44,7 @@ pub struct ActionAffordances {
     pub move_to: Vec<LocationId>,
     pub talk_to: Vec<AgentId>,
     pub confront: Vec<ConfrontationAffordance>,
-    pub can_eat: bool,
+    pub can_purchase: bool,
     pub can_rest: bool,
     pub can_work: bool,
 }
@@ -53,13 +53,14 @@ pub struct ActionAffordances {
 pub struct RouteHint {
     pub destination: LocationId,
     pub next_hop: LocationId,
+    pub distance: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteHints {
     pub home: Option<RouteHint>,
     pub workplace: Option<RouteHint>,
-    pub food: Option<RouteHint>,
+    pub purchase: Option<RouteHint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +80,7 @@ pub struct SelfDescription {
     pub workplace: Option<LocationSummary>,
     pub personality: Personality,
     pub needs: Needs,
+    pub balance: u64,
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub mood: f32,
@@ -88,7 +90,9 @@ pub struct SelfDescription {
 pub struct LocationDescription {
     pub id: LocationId,
     pub name: String,
-    pub serves_food: bool,
+    pub offers_purchase: bool,
+    pub business: Option<Business>,
+    pub purchase_price: Option<u64>,
     pub opening_hours: Option<OpeningHours>,
     pub is_open: bool,
     pub connected: Vec<LocationSummary>,
@@ -98,7 +102,9 @@ pub struct LocationDescription {
 pub struct LocationSummary {
     pub id: LocationId,
     pub name: String,
-    pub serves_food: bool,
+    pub offers_purchase: bool,
+    pub business: Option<Business>,
+    pub purchase_price: Option<u64>,
     pub opening_hours: Option<OpeningHours>,
     pub is_open: bool,
 }
@@ -140,7 +146,9 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         Ok(LocationSummary {
             id,
             name: location.name.clone(),
-            serves_food: location.serves_food,
+            offers_purchase: location.business.is_some(),
+            business: location.business,
+            purchase_price: location.business.map(|business| business.price),
             opening_hours: location.opening_hours,
             is_open: location.is_open(world.tick.hour()),
         })
@@ -201,25 +209,50 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                     })
             })
             .collect(),
-        can_eat: location.id == agent.home
-            || location.serves_food && location.is_open(world.tick.hour()),
+        can_purchase: location.business.is_some_and(|business| {
+            location.is_open(world.tick.hour())
+                && business.stock > 0
+                && agent.balance >= business.price
+        }),
         can_rest: location.id == agent.home,
-        can_work: agent.workplace == Some(location.id) && location.is_open(world.tick.hour()),
+        can_work: agent.workplace == Some(location.id)
+            && location.is_open(world.tick.hour())
+            && location
+                .business
+                .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE),
+    };
+    let desired_offering = if agent.needs.food < 0.25 {
+        Some(Offering::Meal)
+    } else if agent.needs.safety < 0.2 {
+        Some(Offering::Repairs)
+    } else if agent.needs.safety < 0.4 {
+        Some(Offering::Supplies)
+    } else if agent.needs.status < 0.4 {
+        Some(Offering::CivicServices)
+    } else {
+        None
     };
     let route_hints = RouteHints {
         home: next_hop(world, location.id, BTreeSet::from([agent.home])),
-        workplace: agent
-            .workplace
-            .and_then(|workplace| next_hop(world, location.id, BTreeSet::from([workplace]))),
-        food: next_hop(
+        workplace: agent.workplace.and_then(|workplace| {
+            world.locations[&workplace]
+                .business
+                .filter(|business| business.cash >= crate::sim::WORK_WAGE)
+                .and_then(|_| next_hop(world, location.id, BTreeSet::from([workplace])))
+        }),
+        purchase: next_hop(
             world,
             location.id,
             world
                 .locations
                 .values()
                 .filter(|candidate| {
-                    candidate.id == agent.home
-                        || candidate.serves_food && candidate.is_open(world.tick.hour())
+                    candidate.business.is_some_and(|business| {
+                        desired_offering.is_none_or(|offering| business.offering == offering)
+                            && candidate.is_open(world.tick.hour())
+                            && business.stock > 0
+                            && agent.balance >= business.price
+                    })
                 })
                 .map(|candidate| candidate.id)
                 .collect(),
@@ -242,6 +275,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             workplace,
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
+            balance: agent.balance,
             activity: agent.activity,
             intention: agent.intention.clone(),
             mood: agent.mood,
@@ -249,7 +283,9 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         current_location: LocationDescription {
             id: location.id,
             name: location.name.clone(),
-            serves_food: location.serves_food,
+            offers_purchase: location.business.is_some(),
+            business: location.business,
+            purchase_price: location.business.map(|business| business.price),
             opening_hours: location.opening_hours,
             is_open: location.is_open(world.tick.hour()),
             connected,
@@ -294,15 +330,16 @@ fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> 
     for neighbor in &world.locations.get(&start)?.connected {
         if world.locations.get(neighbor)?.is_open(world.tick.hour()) {
             visited.insert(*neighbor);
-            queue.push_back((*neighbor, *neighbor));
+            queue.push_back((*neighbor, *neighbor, 1));
         }
     }
 
-    while let Some((location, first_hop)) = queue.pop_front() {
+    while let Some((location, first_hop, distance)) = queue.pop_front() {
         if targets.contains(&location) {
             return Some(RouteHint {
                 destination: location,
                 next_hop: first_hop,
+                distance,
             });
         }
         for neighbor in &world.locations.get(&location)?.connected {
@@ -310,7 +347,7 @@ fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> 
                 && world.locations.get(neighbor)?.is_open(world.tick.hour())
             {
                 visited.insert(*neighbor);
-                queue.push_back((*neighbor, first_hop));
+                queue.push_back((*neighbor, first_hop, distance + 1));
             }
         }
     }
@@ -413,12 +450,35 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             };
             format!("{subject} observed {target}.")
         }
-        EventKind::Ate { agent } if *agent == observer => "You ate.".into(),
-        EventKind::Ate { agent } => format!("{} ate.", agent_name(*agent)),
+        EventKind::Purchased {
+            agent,
+            offering,
+            cost,
+        } if *agent == observer => format!("You bought {offering} for {cost} coins."),
+        EventKind::Purchased {
+            agent,
+            offering,
+            cost,
+        } => format!("{} bought {offering} for {cost} coins.", agent_name(*agent)),
         EventKind::Rested { agent } if *agent == observer => "You rested.".into(),
         EventKind::Rested { agent } => format!("{} rested.", agent_name(*agent)),
-        EventKind::Worked { agent } if *agent == observer => "You worked.".into(),
-        EventKind::Worked { agent } => format!("{} worked.", agent_name(*agent)),
+        EventKind::Worked {
+            agent,
+            wage,
+            stock_produced,
+        } if *agent == observer => format!(
+            "You worked and earned {wage} coins{}.",
+            produced_stock(*stock_produced)
+        ),
+        EventKind::Worked {
+            agent,
+            wage,
+            stock_produced,
+        } => format!(
+            "{} worked and earned {wage} coins{}.",
+            agent_name(*agent),
+            produced_stock(*stock_produced)
+        ),
         EventKind::GoalCompleted { agent, goal } if *agent == observer => {
             format!("You completed your goal: {goal}.")
         }
@@ -437,16 +497,41 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
     format!("{}: {description}", event.tick)
 }
 
+fn produced_stock(amount: u32) -> String {
+    if amount == 0 {
+        String::new()
+    } else {
+        format!(" and produced {amount} stock")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
         ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, Intention,
-        IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick,
-        World,
+        IntentionGoal, LocationId, ObservationTarget, OpeningHours, ProposedAction, Relationship,
+        Rumor, Tick, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
+
+    fn relocate(world: &mut World, agent: AgentId, destination: LocationId) {
+        let source = world.agents[&agent].location;
+        world
+            .locations
+            .get_mut(&source)
+            .expect("source")
+            .agents
+            .remove(&agent);
+        world
+            .locations
+            .get_mut(&destination)
+            .expect("destination")
+            .agents
+            .insert(agent);
+        world.agents.get_mut(&agent).expect("resident").location = destination;
+    }
 
     #[test]
     fn observation_contains_only_local_agents() {
@@ -495,8 +580,10 @@ mod tests {
                 .all(|goal| goal.progress < goal.required)
         );
         assert_eq!(
-            observation.current_location.serves_food,
-            world.locations[&observation.current_location.id].serves_food
+            observation.current_location.offers_purchase,
+            world.locations[&observation.current_location.id]
+                .business
+                .is_some()
         );
         assert!(
             observation
@@ -505,7 +592,7 @@ mod tests {
                 .iter()
                 .all(|location| {
                     let source = &world.locations[&location.id];
-                    location.serves_food == source.serves_food
+                    location.offers_purchase == source.business.is_some()
                         && location.opening_hours == source.opening_hours
                         && location.is_open == source.is_open(world.tick.hour())
                 })
@@ -539,11 +626,7 @@ mod tests {
                 .map(|agent| agent.id)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            observation.action_affordances.can_eat,
-            observation.current_location.id == observation.self_description.home.id
-                || observation.current_location.serves_food && observation.current_location.is_open
-        );
+        assert!(!observation.action_affordances.can_purchase);
         assert_eq!(
             observation.action_affordances.can_rest,
             observation.current_location.id == observation.self_description.home.id
@@ -553,7 +636,7 @@ mod tests {
             [
                 observation.route_hints.home,
                 observation.route_hints.workplace,
-                observation.route_hints.food,
+                observation.route_hints.purchase,
             ]
             .into_iter()
             .flatten()
@@ -627,6 +710,129 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_visibility_and_routes_respect_balance_and_stock() {
+        let mut world = World::briar_glen(19).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let business = world
+            .locations
+            .values()
+            .find(|location| location.business.is_some() && location.is_open(world.tick.hour()))
+            .expect("open business")
+            .id;
+        relocate(&mut world, actor, business);
+
+        let observation = perceive(&world, actor).expect("observation");
+        assert_eq!(observation.self_description.balance, 20);
+        assert_eq!(observation.current_location.purchase_price, Some(5));
+        assert_eq!(
+            observation.current_location.business,
+            world.locations[&business].business
+        );
+        let ledger = observation
+            .current_location
+            .business
+            .expect("visible ledger");
+        assert_eq!(ledger.cash, crate::sim::BUSINESS_STARTING_CASH);
+        assert_eq!(ledger.wages_paid, 0);
+        assert!(observation.action_affordances.can_purchase);
+
+        let home = world.agents[&actor].home;
+        relocate(&mut world, actor, home);
+        for location in world.locations.values_mut() {
+            if let Some(ledger) = location.business.as_mut() {
+                ledger.stock = 0;
+            }
+        }
+        assert_eq!(
+            perceive(&world, actor)
+                .expect("sold out")
+                .route_hints
+                .purchase,
+            None
+        );
+        world
+            .locations
+            .get_mut(&business)
+            .expect("business")
+            .business
+            .as_mut()
+            .expect("ledger")
+            .stock = 1;
+        assert!(
+            perceive(&world, actor)
+                .expect("stocked")
+                .route_hints
+                .purchase
+                .is_some()
+        );
+
+        world.agents.get_mut(&actor).expect("resident").balance = 0;
+        assert_eq!(
+            perceive(&world, actor).expect("broke").route_hints.purchase,
+            None
+        );
+
+        world.agents.get_mut(&actor).expect("resident").balance = 20;
+        world
+            .locations
+            .get_mut(&business)
+            .expect("business")
+            .business
+            .as_mut()
+            .expect("ledger")
+            .cash = 0;
+        assert_eq!(
+            perceive(&world, actor)
+                .expect("insolvent")
+                .route_hints
+                .workplace,
+            None
+        );
+        relocate(&mut world, actor, business);
+        assert!(
+            !perceive(&world, actor)
+                .expect("insolvent workplace")
+                .action_affordances
+                .can_work
+        );
+    }
+
+    #[test]
+    fn marketplace_routes_follow_the_need_each_offering_satisfies() {
+        let mut world = World::briar_glen(23).expect("town");
+        world.advance_to(Tick(8 * 12)).expect("business hours");
+        let actor = *world.agents.keys().next().expect("resident");
+        let home = world.agents[&actor].home;
+        relocate(&mut world, actor, home);
+        world.agents.get_mut(&actor).expect("resident").balance = 100;
+
+        for (offering, food, safety, status) in [
+            (crate::sim::Offering::Meal, 0.1, 1.0, 1.0),
+            (crate::sim::Offering::Repairs, 1.0, 0.1, 1.0),
+            (crate::sim::Offering::Supplies, 1.0, 0.3, 1.0),
+            (crate::sim::Offering::CivicServices, 1.0, 1.0, 0.1),
+        ] {
+            let needs = &mut world.agents.get_mut(&actor).expect("resident").needs;
+            needs.food = food;
+            needs.safety = safety;
+            needs.status = status;
+            let route = perceive(&world, actor)
+                .expect("marketplace route")
+                .route_hints
+                .purchase
+                .expect("matching business");
+            assert!(route.distance > 0);
+            assert_eq!(
+                world.locations[&route.destination]
+                    .business
+                    .expect("business")
+                    .offering,
+                offering
+            );
+        }
+    }
+
+    #[test]
     fn routes_are_deterministic_and_use_only_open_locations() {
         let mut world = World::briar_glen(12).expect("town");
         world.tick = Tick(12 * 12);
@@ -652,6 +858,7 @@ mod tests {
             Some(super::RouteHint {
                 destination: store,
                 next_hop: houses,
+                distance: 2,
             })
         );
 
@@ -804,7 +1011,11 @@ mod tests {
             ActionResult::Success(events) => events[0].clone(),
             ActionResult::Rejected(reason) => panic!("wait rejected: {reason:?}"),
         };
-        event.kind = EventKind::Worked { agent: source };
+        event.kind = EventKind::Worked {
+            agent: source,
+            wage: crate::sim::WORK_WAGE,
+            stock_produced: 0,
+        };
         world.agents.get_mut(&source).expect("source").activity = None;
         let claim = event.id;
         world.agents.get_mut(&observer).expect("observer").rumors = vec![Rumor {

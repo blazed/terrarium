@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
-const CHECKPOINT_VERSION: i64 = 3;
+const CHECKPOINT_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
@@ -58,7 +58,7 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA user_version = 3;
+         PRAGMA user_version = 6;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
@@ -221,7 +221,12 @@ mod tests {
         );
         assert_eq!(stored.events, world.events());
         assert!(stored.agents.iter().any(|agent| !agent.memories.is_empty()));
-        assert!(stored.agents.iter().any(|agent| agent.activity.is_some()));
+        assert!(
+            stored
+                .locations
+                .iter()
+                .any(|location| location.business.is_some())
+        );
         assert_eq!(load_world(&path).expect("checkpoint"), world);
         fs::remove_file(path).expect("cleanup");
     }
@@ -273,15 +278,23 @@ mod tests {
 
         let connection = Connection::open(&path).expect("database");
         connection
-            .execute_batch("PRAGMA user_version = 4")
+            .execute_batch("PRAGMA user_version = 7")
             .expect("version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(4))
+            Err(PersistenceError::UnsupportedCheckpointVersion(7))
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 3; UPDATE world SET tick = '0'")
+            .execute_batch("PRAGMA user_version = 5")
+            .expect("old version");
+        assert!(matches!(
+            load_world(&path),
+            Err(PersistenceError::UnsupportedCheckpointVersion(5))
+        ));
+
+        connection
+            .execute_batch("PRAGMA user_version = 6; UPDATE world SET tick = '0'")
             .expect("corrupt checkpoint");
         assert!(matches!(
             load_world(&path),

@@ -7,10 +7,10 @@ use std::{net::IpAddr, time::Duration};
 
 const SYSTEM_PROMPT: &str = r#"You choose one action for a simulated character.
 The observation is subjective and complete: do not invent people, places, possessions, or facts.
-Prioritize urgent needs, then feasible active goals. Each goal has a concrete typed target, integer progress and required counts, and an expiry tick; act on the exact target rather than merely matching its broad kind.
+Prioritize urgent needs, then feasible active goals. Each goal has a concrete typed target, integer progress and required counts, and an expiry tick; act on the exact target rather than merely matching its broad kind. Marketplace businesses expose an offering, price, stock, and cash. Meals restore food, supplies and repairs restore safety, and civic services restore status and companionship. Purchase only when can_purchase is true; otherwise follow the nearest affordable stocked route hint or work at an open solvent workplace. Every workplace shift replenishes stock.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
-The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use pursue for multi-step travel, food, rest, or work so the simulation can continue it without another decision. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
+The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use pursue for multi-step travel, purchases, rest, or work so the simulation can continue it without another decision. Move only to a move_to ID, talk only to a talk_to ID, and propose purchase, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
 For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
@@ -18,11 +18,11 @@ Return only one JSON object matching exactly one of these forms:
 {"action":"confront","target":"agent UUID","claim":"event UUID"}
 {"action":"observe","target":{"target":"agent","id":"agent UUID"}}
 {"action":"observe","target":{"target":"location","id":"location UUID"}}
-{"action":"eat"}
+{"action":"purchase"}
 {"action":"rest"}
 {"action":"work"}
 {"action":"pursue","intention":{"goal":"visit","destination":"location UUID"}}
-{"action":"pursue","intention":{"goal":"eat","destination":"route hint destination UUID"}}
+{"action":"pursue","intention":{"goal":"purchase","destination":"route hint destination UUID"}}
 {"action":"pursue","intention":{"goal":"rest"}}
 {"action":"pursue","intention":{"goal":"work"}}
 {"action":"pursue","intention":{"goal":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}}
@@ -410,6 +410,12 @@ mod tests {
             assert!(request.contains(r#"\"action_affordances\":{\"move_to\":["#));
             assert!(request.contains(r#"\"route_hints\":"#));
             assert!(request.contains(r#"\"can_work\":false"#));
+            assert!(request.contains(r#"\"balance\":20"#));
+            assert!(request.contains(r#"\"purchase_price\":"#));
+            assert!(request.contains(r#"\"offering\":\"meal\""#));
+            assert!(request.contains(r#"\"price\":5"#));
+            assert!(request.contains(r#"\"cash\":100"#));
+            assert!(request.contains(r#"\"wages_paid\":0"#));
             assert!(request.contains(r#""temperature":0.7"#));
             assert!(request.contains(r#""stream":true"#));
             assert!(request.contains(r#""reasoning":{"effort":"high"}"#));
@@ -478,7 +484,7 @@ mod tests {
             assert!(request.contains(r#""max_output_tokens":256"#));
             assert!(!request.contains("max_completion_tokens"));
             assert!(request.contains(r#""stream":true"#));
-            let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"action\\\":\\\"eat\\\"}\"}\n\ndata: [DONE]\n\n";
+            let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"action\\\":\\\"purchase\\\"}\"}\n\ndata: [DONE]\n\n";
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -503,7 +509,7 @@ mod tests {
 
         assert_eq!(
             engine.decide(&observation).await.expect("action"),
-            ProposedAction::Eat
+            ProposedAction::Purchase
         );
         server.join().expect("server");
     }
@@ -520,7 +526,7 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
             )
             .expect("headers");
-            for delta in ["{\"action\":", "\"eat\"", "}"] {
+            for delta in ["{\"action\":", "\"purchase\"", "}"] {
                 let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
                 write!(stream, "data: {event}\n\n").expect("event");
                 stream.flush().expect("flush");
@@ -541,7 +547,7 @@ mod tests {
 
         assert_eq!(
             engine.decide(&observation).await.expect("action"),
-            ProposedAction::Eat
+            ProposedAction::Purchase
         );
         server.join().expect("server");
     }

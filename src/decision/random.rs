@@ -1,7 +1,10 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
-    sim::{DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, ProposedAction},
+    sim::{
+        DialogueTone, GoalKind, GoalTarget, IntentionGoal, ObservationTarget, Offering,
+        ProposedAction,
+    },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -69,14 +72,9 @@ impl DecisionEngine for RandomDecisionEngine {
         };
 
         if needs.food < 0.25 {
-            if observation.action_affordances.can_eat {
-                return Ok(ProposedAction::Eat);
-            }
-            return Ok(follow_route(observation.route_hints.food, |hint| {
-                IntentionGoal::Eat {
-                    destination: hint.destination,
-                }
-            }));
+            return Ok(purchase_action(observation, Offering::Meal)
+                .or_else(|| work_action(observation))
+                .unwrap_or(ProposedAction::Wait));
         }
         if needs.energy < 0.2 + 0.1 * personality.neuroticism {
             return Ok(
@@ -92,10 +90,27 @@ impl DecisionEngine for RandomDecisionEngine {
         {
             return Ok(talk(observation, companion));
         }
+        if needs.safety < 0.4
+            && let Some(action) = purchase_action(
+                observation,
+                if needs.safety < 0.2 {
+                    Offering::Repairs
+                } else {
+                    Offering::Supplies
+                },
+            )
+        {
+            return Ok(action);
+        }
         if needs.safety < 0.1 + 0.2 * personality.neuroticism {
             return Ok(ProposedAction::Observe {
                 target: ObservationTarget::Location(observation.current_location.id),
             });
+        }
+        if observation.self_description.balance < 5 * 2
+            && let Some(action) = work_action(observation)
+        {
+            return Ok(action);
         }
 
         if let Some(confrontation) =
@@ -118,6 +133,12 @@ impl DecisionEngine for RandomDecisionEngine {
                 target: confrontation.target,
                 claim: confrontation.claim,
             });
+        }
+
+        if needs.status < 0.4
+            && let Some(action) = purchase_action(observation, Offering::CivicServices)
+        {
+            return Ok(action);
         }
 
         let hour = observation.tick.hour();
@@ -147,11 +168,15 @@ impl DecisionEngine for RandomDecisionEngine {
             };
             match goal.target {
                 GoalTarget::Work { workplace }
-                    if observation
-                        .self_description
-                        .workplace
-                        .as_ref()
-                        .is_some_and(|location| location.id == workplace && location.is_open) =>
+                    if observation.self_description.workplace.as_ref().is_some_and(
+                        |location| {
+                            location.id == workplace
+                                && location.is_open
+                                && location
+                                    .business
+                                    .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
+                        },
+                    ) =>
                 {
                     return Ok(if observation.action_affordances.can_work {
                         ProposedAction::Work
@@ -186,20 +211,17 @@ impl DecisionEngine for RandomDecisionEngine {
                         },
                     );
                 }
-                GoalTarget::Eat { location } => {
-                    return Ok(
-                        if observation.current_location.id == location
-                            && observation.action_affordances.can_eat
-                        {
-                            ProposedAction::Eat
-                        } else {
-                            ProposedAction::Pursue {
-                                intention: IntentionGoal::Eat {
-                                    destination: location,
-                                },
-                            }
+                GoalTarget::Purchase { location } => {
+                    if observation.current_location.id == location
+                        && observation.action_affordances.can_purchase
+                    {
+                        return Ok(ProposedAction::Purchase);
+                    }
+                    return Ok(ProposedAction::Pursue {
+                        intention: IntentionGoal::Purchase {
+                            destination: location,
                         },
-                    );
+                    });
                 }
                 GoalTarget::Rest { home } => {
                     return Ok(
@@ -221,6 +243,9 @@ impl DecisionEngine for RandomDecisionEngine {
         if (needs.money < 0.75 || needs.status < 0.75)
             && let Some(workplace) = &observation.self_description.workplace
             && workplace.is_open
+            && workplace
+                .business
+                .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
         {
             return Ok(if observation.action_affordances.can_work {
                 ProposedAction::Work
@@ -267,6 +292,53 @@ impl DecisionEngine for RandomDecisionEngine {
             _ => ProposedAction::Wait,
         })
     }
+}
+
+fn purchase_action(observation: &AgentObservation, offering: Offering) -> Option<ProposedAction> {
+    if observation.action_affordances.can_purchase
+        && observation
+            .current_location
+            .business
+            .is_some_and(|business| business.offering == offering)
+    {
+        return Some(ProposedAction::Purchase);
+    }
+    observation
+        .route_hints
+        .purchase
+        .filter(|hint| {
+            observation
+                .action_affordances
+                .move_to
+                .contains(&hint.next_hop)
+        })
+        .map(|hint| ProposedAction::Pursue {
+            intention: IntentionGoal::Purchase {
+                destination: hint.destination,
+            },
+        })
+}
+
+fn work_action(observation: &AgentObservation) -> Option<ProposedAction> {
+    observation
+        .self_description
+        .workplace
+        .as_ref()
+        .filter(|workplace| {
+            workplace.is_open
+                && workplace
+                    .business
+                    .is_some_and(|business| business.cash >= crate::sim::WORK_WAGE)
+        })
+        .map(|_| {
+            if observation.action_affordances.can_work {
+                ProposedAction::Work
+            } else {
+                ProposedAction::Pursue {
+                    intention: IntentionGoal::Work,
+                }
+            }
+        })
 }
 
 fn talk(observation: &AgentObservation, companion: &VisibleAgent) -> ProposedAction {
@@ -369,7 +441,7 @@ mod tests {
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, perceive},
         sim::{
-            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal,
+            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Offering,
             ProposedAction, Relationship, Tick, World,
         },
     };
@@ -433,6 +505,7 @@ mod tests {
         observation.self_description.needs.energy = 0.5;
         observation.self_description.needs.companionship = 0.5;
         observation.self_description.needs.safety = 0.5;
+        observation.self_description.needs.status = 0.5;
         let target = observation.visible_agents[0].id;
         let claim = EventId(Uuid::nil());
         observation.action_affordances.confront = vec![ConfrontationAffordance { target, claim }];
@@ -456,6 +529,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn marketplace_choices_follow_the_need_each_offering_satisfies() {
+        let mut world = World::briar_glen(23).expect("town");
+        world.advance_to(Tick(8 * 12)).expect("business hours");
+        let actor = *world.agents.keys().next().expect("resident");
+        world.agents.get_mut(&actor).expect("resident").balance = 100;
+        let mut engine = RandomDecisionEngine::new(23);
+
+        for (offering, food, safety, status) in [
+            (Offering::Meal, 0.1, 1.0, 1.0),
+            (Offering::Repairs, 1.0, 0.1, 1.0),
+            (Offering::Supplies, 1.0, 0.3, 1.0),
+            (Offering::CivicServices, 1.0, 1.0, 0.1),
+        ] {
+            let needs = &mut world.agents.get_mut(&actor).expect("resident").needs;
+            needs.food = food;
+            needs.energy = 1.0;
+            needs.companionship = 1.0;
+            needs.safety = safety;
+            needs.status = status;
+            let observation = perceive(&world, actor).expect("observation");
+            let destination = observation
+                .route_hints
+                .purchase
+                .expect("market route")
+                .destination;
+            assert_eq!(
+                world.locations[&destination]
+                    .business
+                    .expect("business")
+                    .offering,
+                offering
+            );
+            assert_eq!(
+                engine.decide(&observation).await.expect("decision"),
+                ProposedAction::Pursue {
+                    intention: IntentionGoal::Purchase { destination },
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn routines_follow_multi_hop_route_hints() {
         let mut world = World::briar_glen(7).expect("town");
         let actor = world
@@ -469,6 +584,7 @@ mod tests {
         agent.needs.energy = 1.0;
         agent.needs.companionship = 1.0;
         agent.needs.safety = 1.0;
+        agent.needs.status = 1.0;
         agent.personality.ambition = 1.0;
         agent.personality.openness = 0.0;
         agent.personality.agreeableness = 0.0;
@@ -506,10 +622,12 @@ mod tests {
         let mut engine = RandomDecisionEngine::new(7);
 
         let hungry = perceive(&world, actor).expect("observation");
-        assert_eq!(
+        assert!(matches!(
             engine.decide(&hungry).await.expect("decision"),
-            ProposedAction::Eat
-        );
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Purchase { .. }
+            }
+        ));
         let mut tired = hungry.clone();
         tired.self_description.needs.food = 0.5;
         tired.self_description.needs.energy = 0.1;
@@ -517,12 +635,43 @@ mod tests {
             engine.decide(&tired).await.expect("decision"),
             ProposedAction::Rest
         );
+        let mut broke = hungry.clone();
+        broke.self_description.balance = 0;
+        broke.self_description.needs.food = 0.5;
+        broke.self_description.needs.energy = 0.5;
+        broke.self_description.needs.companionship = 0.5;
+        broke.self_description.needs.safety = 0.5;
+        broke.self_description.needs.status = 0.5;
+        assert_eq!(
+            engine.decide(&broke).await.expect("decision"),
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
+            }
+        );
+        let mut insolvent = broke.clone();
+        insolvent
+            .self_description
+            .workplace
+            .as_mut()
+            .expect("workplace")
+            .business
+            .as_mut()
+            .expect("ledger")
+            .cash = 0;
+        assert!(!matches!(
+            engine.decide(&insolvent).await.expect("decision"),
+            ProposedAction::Work
+                | ProposedAction::Pursue {
+                    intention: IntentionGoal::Work
+                }
+        ));
 
         let agent = world.agents.get_mut(&actor).expect("resident");
         agent.needs.food = 1.0;
         agent.needs.energy = 0.5;
         agent.needs.companionship = 0.5;
         agent.needs.safety = 0.5;
+        agent.needs.status = 1.0;
         agent.personality.openness = 0.0;
         agent.personality.agreeableness = 0.0;
         agent.personality.neuroticism = 0.0;
@@ -585,6 +734,7 @@ mod tests {
 
         let mut purposeful = lonely;
         purposeful.self_description.needs.companionship = 0.5;
+        purposeful.self_description.needs.status = 0.5;
         let destination = purposeful.action_affordances.move_to[0];
         purposeful.goals = vec![Goal::new(
             "Visit somewhere specific",

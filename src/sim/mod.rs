@@ -15,7 +15,7 @@ pub use agent::{
     Personality, Rumor,
 };
 pub use event::{ConfrontationOutcome, Event, EventKind};
-pub use location::{Location, OpeningHours};
+pub use location::{Business, Location, Offering, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
 pub(crate) use world::event_evidence;
@@ -45,6 +45,10 @@ domain_id!(LocationId);
 domain_id!(EventId);
 
 pub const NEW_WORLD_START_HOUR: u64 = 7;
+pub const BUSINESS_STARTING_CASH: u64 = 100;
+pub const STOCK_PER_SHIFT: u32 = 4;
+pub const STARTING_STOCK: u32 = 20;
+pub const WORK_WAGE: u64 = 10;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

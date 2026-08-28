@@ -94,7 +94,7 @@ pub enum GoalTarget {
     Work { workplace: LocationId },
     Talk { resident: AgentId },
     Visit { destination: LocationId },
-    Eat { location: LocationId },
+    Purchase { location: LocationId },
     Rest { home: LocationId },
 }
 
@@ -174,7 +174,7 @@ pub enum ActivityKind {
     Travelling,
     Conversing,
     Observing,
-    Eating,
+    Shopping,
     Resting,
     Working,
     Waiting,
@@ -192,7 +192,7 @@ impl Activity {
             EventKind::Moved { .. } => (ActivityKind::Travelling, 2),
             EventKind::Spoke { .. } | EventKind::Confronted { .. } => (ActivityKind::Conversing, 3),
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
-            EventKind::Ate { .. } => (ActivityKind::Eating, 3),
+            EventKind::Purchased { .. } => (ActivityKind::Shopping, 3),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
@@ -216,6 +216,7 @@ pub struct Agent {
     pub location: LocationId,
     pub personality: Personality,
     pub needs: Needs,
+    pub balance: u64,
     #[serde(default)]
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,

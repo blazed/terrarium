@@ -100,7 +100,7 @@ mod tests {
         assert!(
             left.events()
                 .iter()
-                .any(|event| matches!(event.kind, EventKind::Ate { .. }))
+                .any(|event| matches!(event.kind, EventKind::Purchased { .. }))
         );
         assert!(
             left.events()

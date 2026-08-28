@@ -1,4 +1,6 @@
-use super::{ActionRejection, AgentId, DialogueTone, EventId, LocationId, ObservationTarget, Tick};
+use super::{
+    ActionRejection, AgentId, DialogueTone, EventId, LocationId, ObservationTarget, Offering, Tick,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,14 +54,18 @@ pub enum EventKind {
         observer: AgentId,
         target: ObservationTarget,
     },
-    Ate {
+    Purchased {
         agent: AgentId,
+        offering: Offering,
+        cost: u64,
     },
     Rested {
         agent: AgentId,
     },
     Worked {
         agent: AgentId,
+        wage: u64,
+        stock_produced: u32,
     },
     GoalCompleted {
         agent: AgentId,

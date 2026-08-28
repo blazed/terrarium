@@ -18,12 +18,41 @@ impl OpeningHours {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Offering {
+    Meal,
+    Supplies,
+    Repairs,
+    CivicServices,
+}
+
+impl std::fmt::Display for Offering {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Meal => "meal",
+            Self::Supplies => "supplies",
+            Self::Repairs => "repairs",
+            Self::CivicServices => "civic services",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Business {
+    pub offering: Offering,
+    pub price: u64,
+    pub cash: u64,
+    pub stock: u32,
+    pub revenue: u64,
+    pub wages_paid: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
     pub id: LocationId,
     pub name: String,
-    #[serde(default)]
-    pub serves_food: bool,
+    pub business: Option<Business>,
     pub opening_hours: Option<OpeningHours>,
     pub connected: BTreeSet<LocationId>,
     pub agents: BTreeSet<AgentId>,

@@ -35,7 +35,7 @@ pub fn render_dashboard(world: &World) -> String {
             EventKind::Moved { .. } => 0,
             EventKind::Spoke { .. } => 1,
             EventKind::Confronted { .. } => 2,
-            EventKind::Ate { .. } => 3,
+            EventKind::Purchased { .. } => 3,
             EventKind::Rested { .. } => 4,
             EventKind::Worked { .. } => 5,
             EventKind::GoalCompleted { .. } => 6,
@@ -56,17 +56,18 @@ pub fn render_dashboard(world: &World) -> String {
             counts[7]
         ),
         format!(
-            "Meals: {} | Rests: {} | Work: {} | Goals completed: {}",
+            "Purchases: {} | Rests: {} | Work: {} | Goals completed: {}",
             counts[3], counts[4], counts[5], counts[6]
         ),
         String::new(),
         "RESIDENTS".into(),
         format!(
-            "{:<12} {:<14} {:<9} {:>6} {:<12} {:<20} {:<14} {:<15} {}",
+            "{:<12} {:<14} {:<9} {:>6} {:>5} {:<12} {:<20} {:<14} {:<15} {}",
             "Name",
             "Location",
             "Activity",
             "Mood",
+            "Coins",
             "Urgent",
             "Goal",
             "Intention",
@@ -94,11 +95,12 @@ pub fn render_dashboard(world: &World) -> String {
         let relationship = strongest_relationship(world, agent);
         let rumors = agent.rumors.iter().filter(|rumor| !rumor.resolved).count();
         lines.push(format!(
-            "{:<12} {:<14} {:<9} {:>+6.2} {:<12} {:<20} {:<14} {:<15} {}/{}",
+            "{:<12} {:<14} {:<9} {:>+6.2} {:>5} {:<12} {:<20} {:<14} {:<15} {}/{}",
             clipped(&agent.name, 12),
             clipped(&location, 14),
             activity,
             agent.mood,
+            agent.balance,
             format!("{need} {}%", (value * 100.0).round() as u8),
             clipped(&goal, 20),
             clipped(&intention, 14),
@@ -106,6 +108,29 @@ pub fn render_dashboard(world: &World) -> String {
             agent.beliefs.len(),
             rumors,
         ));
+    }
+
+    lines.extend([
+        String::new(),
+        "BUSINESSES".into(),
+        format!(
+            "{:<20} {:<14} {:>6} {:>7} {:>8} {:>7} {:>6}",
+            "Name", "Offering", "Cash", "Stock", "Revenue", "Wages", "Price"
+        ),
+    ]);
+    for location in world.locations.values() {
+        if let Some(business) = location.business {
+            lines.push(format!(
+                "{:<20} {:<14} {:>6} {:>7} {:>8} {:>7} {:>6}",
+                clipped(&location.name, 20),
+                business.offering,
+                business.cash,
+                business.stock,
+                business.revenue,
+                business.wages_paid,
+                business.price,
+            ));
+        }
     }
 
     lines.extend([String::new(), "RECENT EVENTS".into()]);
@@ -126,7 +151,7 @@ pub fn render_summary(world: &World) -> String {
     let moves = count(|kind| matches!(kind, EventKind::Moved { .. }));
     let conversations = count(|kind| matches!(kind, EventKind::Spoke { .. }));
     let confrontations = count(|kind| matches!(kind, EventKind::Confronted { .. }));
-    let meals = count(|kind| matches!(kind, EventKind::Ate { .. }));
+    let purchases = count(|kind| matches!(kind, EventKind::Purchased { .. }));
     let rests = count(|kind| matches!(kind, EventKind::Rested { .. }));
     let work = count(|kind| matches!(kind, EventKind::Worked { .. }));
     let goals = count(|kind| matches!(kind, EventKind::GoalCompleted { .. }));
@@ -138,7 +163,7 @@ pub fn render_summary(world: &World) -> String {
         format!("Moves: {moves}"),
         format!("Conversations: {conversations}"),
         format!("Confrontations: {confrontations}"),
-        format!("Meals: {meals}"),
+        format!("Purchases: {purchases}"),
         format!("Rests: {rests}"),
         format!("Work: {work}"),
         format!("Goals completed: {goals}"),
@@ -181,9 +206,28 @@ pub fn render_event(world: &World, event: &Event) -> String {
             agent_name(world, *observer),
             target_name(world, target)
         ),
-        EventKind::Ate { agent } => format!("{time}  {} ate", agent_name(world, *agent)),
+        EventKind::Purchased {
+            agent,
+            offering,
+            cost,
+        } => format!(
+            "{time}  {} bought {offering} for {cost} coins",
+            agent_name(world, *agent)
+        ),
         EventKind::Rested { agent } => format!("{time}  {} rested", agent_name(world, *agent)),
-        EventKind::Worked { agent } => format!("{time}  {} worked", agent_name(world, *agent)),
+        EventKind::Worked {
+            agent,
+            wage,
+            stock_produced,
+        } => format!(
+            "{time}  {} worked and earned {wage} coins{}",
+            agent_name(world, *agent),
+            if *stock_produced == 0 {
+                String::new()
+            } else {
+                format!(" and produced {stock_produced} stock")
+            }
+        ),
         EventKind::GoalCompleted { agent, goal } => format!(
             "{time}  {} completed goal: {goal}",
             agent_name(world, *agent)
@@ -237,8 +281,8 @@ fn intention_name(world: &World, goal: &IntentionGoal) -> String {
         IntentionGoal::Visit { destination } => {
             format!("visit {}", location_name(world, *destination))
         }
-        IntentionGoal::Eat { destination } => {
-            format!("eat at {}", location_name(world, *destination))
+        IntentionGoal::Purchase { destination } => {
+            format!("buy at {}", location_name(world, *destination))
         }
         IntentionGoal::Rest => "rest".into(),
         IntentionGoal::Work => "work".into(),
@@ -303,7 +347,11 @@ mod tests {
         assert!(dashboard.contains("=== Briar Glen — Day 1"));
         assert!(dashboard.contains("RESIDENTS"));
         assert!(dashboard.contains("Strongest tie"));
+        assert!(dashboard.contains("Coins"));
         assert!(dashboard.contains("B/R"));
+        assert!(dashboard.contains("BUSINESSES"));
+        assert!(dashboard.contains("Revenue"));
+        assert!(dashboard.contains("Wages"));
         assert!(dashboard.contains(&world.agents.values().next().expect("resident").name));
         assert!(dashboard.contains("RECENT EVENTS"));
     }

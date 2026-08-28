@@ -37,7 +37,7 @@ pub enum IntentionGoal {
     Visit {
         destination: LocationId,
     },
-    Eat {
+    Purchase {
         destination: LocationId,
     },
     Rest,
@@ -73,7 +73,7 @@ pub enum ProposedAction {
     Observe {
         target: ObservationTarget,
     },
-    Eat,
+    Purchase,
     Rest,
     Work,
     Pursue {
@@ -111,8 +111,20 @@ pub enum ActionRejection {
         from: LocationId,
         destination: LocationId,
     },
-    #[error("agent cannot eat at location {0}")]
-    CannotEatHere(LocationId),
+    #[error("agent cannot purchase at location {0}")]
+    CannotPurchaseHere(LocationId),
+    #[error("business at location {0} is sold out")]
+    SoldOut(LocationId),
+    #[error("purchase costs {cost} coins but agent has {available}")]
+    InsufficientFunds { cost: u64, available: u64 },
+    #[error("economy balance overflow")]
+    EconomyOverflow,
+    #[error("business at {location} cannot cover the {wage}-coin wage; cash is {available}")]
+    InsolventEmployer {
+        location: LocationId,
+        wage: u64,
+        available: u64,
+    },
     #[error("agent cannot rest at location {0}")]
     CannotRestHere(LocationId),
     #[error("agent cannot work at location {0}")]

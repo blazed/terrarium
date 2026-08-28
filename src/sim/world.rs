@@ -1,8 +1,9 @@
 use super::{
-    ActionRejection, ActionResult, Activity, Agent, AgentId, ConfrontationOutcome, DialogueTone,
-    Event, EventId, EventKind, Goal, GoalKind, GoalTarget, Intention, IntentionGoal, Location,
-    LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
-    OpeningHours, Personality, ProposedAction, Relationship, Rumor, Tick, seeded_uuid,
+    ActionRejection, ActionResult, Activity, Agent, AgentId, BUSINESS_STARTING_CASH, Business,
+    ConfrontationOutcome, DialogueTone, Event, EventId, EventKind, Goal, GoalKind, GoalTarget,
+    Intention, IntentionGoal, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR,
+    Needs, ObservationTarget, Occupation, Offering, OpeningHours, Personality, ProposedAction,
+    Relationship, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -22,7 +23,7 @@ pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32
             DialogueTone::Neutral => (*speaker, 0.04, 0.0, 0.0),
             DialogueTone::Tense => (*speaker, 0.02, -0.03, 0.12),
         }),
-        EventKind::Worked { agent } => Some((*agent, 0.0, 0.08, 0.0)),
+        EventKind::Worked { agent, .. } => Some((*agent, 0.0, 0.08, 0.0)),
         _ => None,
     }
 }
@@ -70,15 +71,26 @@ impl World {
             .into_iter()
             .zip(location_ids.iter().copied())
             .map(|(name, id)| {
+                let offering = match name {
+                    "The Crooked Lantern" | "Mara's Bakery" => Some((Offering::Meal, 5)),
+                    "General Store" | "Abandoned Mill" => Some((Offering::Supplies, 6)),
+                    "Carpenter's Workshop" => Some((Offering::Repairs, 8)),
+                    "Town Hall" => Some((Offering::CivicServices, 4)),
+                    _ => None,
+                };
                 (
                     id,
                     Location {
                         id,
                         name: name.into(),
-                        serves_food: matches!(
-                            name,
-                            "The Crooked Lantern" | "Mara's Bakery" | "General Store"
-                        ),
+                        business: offering.map(|(offering, price)| Business {
+                            offering,
+                            price,
+                            cash: BUSINESS_STARTING_CASH,
+                            stock: STARTING_STOCK,
+                            revenue: 0,
+                            wages_paid: 0,
+                        }),
                         opening_hours: match name {
                             "The Crooked Lantern" => Some(OpeningHours {
                                 opens_at_hour: 12,
@@ -175,6 +187,7 @@ impl World {
                     status: vary_need(0.35),
                     energy: vary_need(0.8),
                 },
+                balance: 20,
                 activity: None,
                 intention: None,
                 mood: 0.0,
@@ -250,13 +263,13 @@ impl World {
                     IntentionGoal::Visit { destination } => locations
                         .get(destination)
                         .is_none_or(|location| !location.is_open(proposed.hour())),
-                    IntentionGoal::Eat { destination } if *destination != agent.home => locations
+                    IntentionGoal::Purchase { destination } => locations
                         .get(destination)
                         .is_none_or(|location| !location.is_open(proposed.hour())),
                     _ => false,
                 };
                 let urgent_conflict = match &intention.goal {
-                    IntentionGoal::Eat { .. } => {
+                    IntentionGoal::Purchase { .. } => {
                         agent.needs.energy < 0.1 || agent.needs.safety < 0.1
                     }
                     IntentionGoal::Rest => agent.needs.food < 0.1 || agent.needs.safety < 0.1,
@@ -356,6 +369,34 @@ impl World {
             {
                 return Err(WorldError::InvalidState(format!(
                     "event {} references an unknown location",
+                    event.id
+                )));
+            }
+            let invalid_transaction = match &event.kind {
+                EventKind::Purchased { offering, cost, .. } => event
+                    .location
+                    .and_then(|location| self.locations.get(&location))
+                    .and_then(|location| location.business)
+                    .is_none_or(|business| {
+                        *offering != business.offering || *cost != business.price
+                    }),
+                EventKind::Worked {
+                    wage,
+                    stock_produced,
+                    ..
+                } => {
+                    *wage != WORK_WAGE
+                        || *stock_produced != STOCK_PER_SHIFT
+                        || event
+                            .location
+                            .and_then(|location| self.locations.get(&location))
+                            .is_none_or(|location| location.business.is_none())
+                }
+                _ => false,
+            };
+            if invalid_transaction {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} has an invalid transaction amount",
                     event.id
                 )));
             }
@@ -600,23 +641,46 @@ impl World {
                     target,
                 }
             }
-            ProposedAction::Eat => {
+            ProposedAction::Purchase => {
                 let location = &self.locations[&current];
-                if current != agent.home && !location.serves_food {
+                if location.business.is_none() {
                     return self.reject(
                         actor,
                         Some(current),
-                        ActionRejection::CannotEatHere(current),
+                        ActionRejection::CannotPurchaseHere(current),
                     );
                 }
-                if current != agent.home && !location.is_open(self.tick.hour()) {
+                if !location.is_open(self.tick.hour()) {
                     return self.reject(
                         actor,
                         Some(current),
                         ActionRejection::LocationClosed(current),
                     );
                 }
-                EventKind::Ate { agent: actor }
+                let business = location.business.expect("validated business");
+                if business.stock == 0 {
+                    return self.reject(actor, Some(current), ActionRejection::SoldOut(current));
+                }
+                if agent.balance < business.price {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::InsufficientFunds {
+                            cost: business.price,
+                            available: agent.balance,
+                        },
+                    );
+                }
+                if business.revenue.checked_add(business.price).is_none()
+                    || business.cash.checked_add(business.price).is_none()
+                {
+                    return self.reject(actor, Some(current), ActionRejection::EconomyOverflow);
+                }
+                EventKind::Purchased {
+                    agent: actor,
+                    offering: business.offering,
+                    cost: business.price,
+                }
             }
             ProposedAction::Rest => {
                 if current != agent.home {
@@ -643,7 +707,36 @@ impl World {
                         ActionRejection::LocationClosed(current),
                     );
                 }
-                EventKind::Worked { agent: actor }
+                let Some(business) = self.locations[&current].business else {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::CannotWorkHere(current),
+                    );
+                };
+                if business.cash < WORK_WAGE {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::InsolventEmployer {
+                            location: current,
+                            wage: WORK_WAGE,
+                            available: business.cash,
+                        },
+                    );
+                }
+                let stock_produced = STOCK_PER_SHIFT;
+                if agent.balance.checked_add(WORK_WAGE).is_none()
+                    || business.wages_paid.checked_add(WORK_WAGE).is_none()
+                    || business.stock.checked_add(stock_produced).is_none()
+                {
+                    return self.reject(actor, Some(current), ActionRejection::EconomyOverflow);
+                }
+                EventKind::Worked {
+                    agent: actor,
+                    wage: WORK_WAGE,
+                    stock_produced,
+                }
             }
             ProposedAction::Wait => EventKind::Waited { agent: actor },
         };
@@ -696,10 +789,21 @@ impl World {
     pub fn continue_intention(&mut self, actor: AgentId) -> Option<ActionResult> {
         let intention = self.agents.get(&actor)?.intention.clone()?;
         let needs = &self.agents.get(&actor)?.needs;
-        let interrupted = (needs.food < 0.1
-            && !matches!(&intention.goal, IntentionGoal::Eat { .. }))
+        let purchase_offering = match intention.goal {
+            IntentionGoal::Purchase { destination } => self
+                .locations
+                .get(&destination)
+                .and_then(|location| location.business)
+                .map(|business| business.offering),
+            _ => None,
+        };
+        let interrupted = (needs.food < 0.1 && purchase_offering != Some(Offering::Meal))
             || (needs.energy < 0.1 && !matches!(&intention.goal, IntentionGoal::Rest))
-            || needs.safety < 0.1;
+            || (needs.safety < 0.1
+                && !matches!(
+                    purchase_offering,
+                    Some(Offering::Supplies | Offering::Repairs)
+                ));
         if intention.expires_at <= self.tick || interrupted {
             self.agents.get_mut(&actor)?.intention = None;
             return None;
@@ -742,16 +846,16 @@ impl World {
         };
         match &intention.goal {
             IntentionGoal::Visit { destination } => travel(*destination),
-            IntentionGoal::Eat { destination } => {
+            IntentionGoal::Purchase { destination } => {
                 let location = self
                     .locations
                     .get(destination)
                     .ok_or(ActionRejection::UnknownLocation(*destination))?;
-                if *destination != agent.home && !location.serves_food {
-                    return Err(ActionRejection::CannotEatHere(*destination));
+                if location.business.is_none() {
+                    return Err(ActionRejection::CannotPurchaseHere(*destination));
                 }
                 if agent.location == *destination {
-                    Ok(Some(ProposedAction::Eat))
+                    Ok(Some(ProposedAction::Purchase))
                 } else {
                     travel(*destination)
                 }
@@ -1011,7 +1115,11 @@ impl World {
         let agent = &self.agents[&actor];
         let expires_at = Tick(self.tick.0.saturating_add(GOAL_DURATION_TICKS));
         let mut candidates = Vec::new();
-        if let Some(workplace) = agent.workplace {
+        if let Some(workplace) = agent.workplace
+            && self.locations[&workplace]
+                .business
+                .is_some_and(|business| business.cash >= WORK_WAGE)
+        {
             candidates.push((
                 agent.personality.ambition + (1.0 - agent.needs.money),
                 Goal::new(
@@ -1092,18 +1200,39 @@ impl World {
             ));
         }
 
-        candidates.push((
-            1.0 - agent.needs.food,
-            Goal::new(
-                "Have a meal at home",
-                GoalKind::Wellbeing,
-                GoalTarget::Eat {
-                    location: agent.home,
-                },
-                1,
-                expires_at,
-            ),
-        ));
+        let marketplace = self
+            .locations
+            .values()
+            .filter(|location| {
+                location.business.is_some_and(|business| business.stock > 0)
+                    && location.is_open(self.tick.hour())
+                    && location
+                        .business
+                        .is_some_and(|business| agent.balance >= business.price)
+                    && self.next_route_step(agent.location, location.id).is_ok()
+            })
+            .collect::<Vec<_>>();
+        for location in marketplace {
+            let business = location.business.expect("marketplace");
+            let need = match business.offering {
+                Offering::Meal => 1.0 - agent.needs.food,
+                Offering::Supplies => (1.0 - agent.needs.safety) * 0.8,
+                Offering::Repairs => 1.0 - agent.needs.safety,
+                Offering::CivicServices => 1.0 - agent.needs.status,
+            };
+            candidates.push((
+                need - business.price as f32 / 100.0,
+                Goal::new(
+                    format!("Buy {} at {}", business.offering, location.name),
+                    GoalKind::Wellbeing,
+                    GoalTarget::Purchase {
+                        location: location.id,
+                    },
+                    1,
+                    expires_at,
+                ),
+            ));
+        }
         candidates.push((
             1.0 - agent.needs.energy + agent.personality.neuroticism * 0.2,
             Goal::new(
@@ -1134,6 +1263,18 @@ impl World {
             GoalTarget::Visit { destination } => {
                 self.locations[destination].is_open(self.tick.hour())
             }
+            GoalTarget::Purchase { location } => {
+                self.locations[location]
+                    .business
+                    .is_some_and(|business| business.stock > 0)
+                    && self.locations[location].is_open(self.tick.hour())
+            }
+            GoalTarget::Work { workplace } => {
+                self.locations[workplace]
+                    .business
+                    .is_some_and(|business| business.cash >= WORK_WAGE)
+                    && self.locations[workplace].is_open(self.tick.hour())
+            }
             _ => true,
         }
     }
@@ -1148,13 +1289,10 @@ impl World {
             GoalTarget::Visit { destination } => {
                 *destination != agent.location && self.locations.contains_key(destination)
             }
-            GoalTarget::Eat { location } => {
-                *location == agent.home
-                    || self
-                        .locations
-                        .get(location)
-                        .is_some_and(|location| location.serves_food)
-            }
+            GoalTarget::Purchase { location } => self
+                .locations
+                .get(location)
+                .is_some_and(|location| location.business.is_some()),
             GoalTarget::Rest { home } => *home == agent.home,
         }
     }
@@ -1167,7 +1305,7 @@ impl World {
                 .goals
                 .iter()
                 .position(|goal| match (&goal.target, event) {
-                    (GoalTarget::Work { workplace }, EventKind::Worked { agent }) => {
+                    (GoalTarget::Work { workplace }, EventKind::Worked { agent, .. }) => {
                         *agent == actor && *workplace == location
                     }
                     (
@@ -1179,9 +1317,10 @@ impl World {
                     (GoalTarget::Visit { destination }, EventKind::Moved { agent, to, .. }) => {
                         *agent == actor && *destination == *to
                     }
-                    (GoalTarget::Eat { location: target }, EventKind::Ate { agent }) => {
-                        *agent == actor && *target == location
-                    }
+                    (
+                        GoalTarget::Purchase { location: target },
+                        EventKind::Purchased { agent, .. },
+                    ) => *agent == actor && *target == location,
                     (GoalTarget::Rest { home }, EventKind::Rested { agent }) => {
                         *agent == actor && *home == location
                     }
@@ -1224,11 +1363,30 @@ impl World {
                     Needs::restore(&mut agent.needs.safety, 0.03);
                 }
             }
-            EventKind::Ate { .. } => {
+            EventKind::Purchased { offering, cost, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
-                    Needs::restore(&mut agent.needs.food, 0.25);
-                    Needs::restore(&mut agent.needs.energy, 0.01);
+                    agent.balance -= *cost;
+                    match offering {
+                        Offering::Meal => {
+                            Needs::restore(&mut agent.needs.food, 0.25);
+                            Needs::restore(&mut agent.needs.energy, 0.01);
+                        }
+                        Offering::Supplies => Needs::restore(&mut agent.needs.safety, 0.15),
+                        Offering::Repairs => Needs::restore(&mut agent.needs.safety, 0.25),
+                        Offering::CivicServices => {
+                            Needs::restore(&mut agent.needs.status, 0.15);
+                            Needs::restore(&mut agent.needs.companionship, 0.03);
+                        }
+                    }
                 }
+                let business = self
+                    .locations
+                    .get_mut(&self.agents[&actor].location)
+                    .and_then(|location| location.business.as_mut())
+                    .expect("validated business");
+                business.cash += *cost;
+                business.stock -= 1;
+                business.revenue += *cost;
             }
             EventKind::Rested { .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
@@ -1236,13 +1394,26 @@ impl World {
                     Needs::restore(&mut agent.needs.safety, 0.05);
                 }
             }
-            EventKind::Worked { .. } => {
+            EventKind::Worked {
+                wage,
+                stock_produced,
+                ..
+            } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
+                    agent.balance += *wage;
                     Needs::restore(&mut agent.needs.money, 0.12);
                     Needs::restore(&mut agent.needs.status, 0.05);
                     agent.needs.energy = (agent.needs.energy - 0.03).max(0.0);
                     agent.needs.food = (agent.needs.food - 0.02).max(0.0);
                 }
+                let business = self
+                    .locations
+                    .get_mut(&self.agents[&actor].location)
+                    .and_then(|location| location.business.as_mut())
+                    .expect("validated employer");
+                business.cash -= *wage;
+                business.stock += *stock_produced;
+                business.wages_paid += *wage;
             }
             EventKind::Confronted { .. }
             | EventKind::GoalCompleted { .. }
@@ -1332,9 +1503,9 @@ impl World {
                 adjust(*speaker, speaker_change);
                 adjust(*listener, listener_change);
             }
-            EventKind::Ate { agent } => adjust(*agent, 0.06),
+            EventKind::Purchased { agent, .. } => adjust(*agent, 0.06),
             EventKind::Rested { agent } => adjust(*agent, 0.08),
-            EventKind::Worked { agent } => adjust(*agent, 0.03),
+            EventKind::Worked { agent, .. } => adjust(*agent, 0.03),
             EventKind::Confronted {
                 accuser,
                 target,
@@ -1381,9 +1552,9 @@ impl World {
                     witnesses.insert(*agent);
                 }
             }
-            EventKind::Ate { agent }
+            EventKind::Purchased { agent, .. }
             | EventKind::Rested { agent }
-            | EventKind::Worked { agent }
+            | EventKind::Worked { agent, .. }
             | EventKind::GoalCompleted { agent, .. } => {
                 witnesses.insert(*agent);
             }
@@ -1410,6 +1581,14 @@ impl World {
 
     pub fn validate(&self) -> Result<(), WorldError> {
         for (id, location) in &self.locations {
+            if location
+                .business
+                .is_some_and(|business| business.price == 0)
+            {
+                return Err(WorldError::InvalidState(format!(
+                    "business at {id} has a zero price"
+                )));
+            }
             if location
                 .opening_hours
                 .is_some_and(|hours| !hours.is_valid())
@@ -1451,6 +1630,18 @@ impl World {
             if !self.locations.contains_key(&agent.location) {
                 return Err(WorldError::UnknownLocation(agent.location));
             }
+            if !self.locations.contains_key(&agent.home) {
+                return Err(WorldError::UnknownLocation(agent.home));
+            }
+            if agent.workplace.is_some_and(|workplace| {
+                self.locations
+                    .get(&workplace)
+                    .is_none_or(|location| location.business.is_none())
+            }) {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} has a workplace without a business ledger"
+                )));
+            }
             if memberships.get(id) != Some(&1) {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} belongs to {} locations",
@@ -1475,7 +1666,8 @@ impl World {
             }
             if let Some(intention) = &agent.intention {
                 let target_is_valid = match &intention.goal {
-                    IntentionGoal::Visit { destination } | IntentionGoal::Eat { destination } => {
+                    IntentionGoal::Visit { destination }
+                    | IntentionGoal::Purchase { destination } => {
                         self.locations.contains_key(destination)
                     }
                     IntentionGoal::Rest => self.locations.contains_key(&agent.home),
@@ -1558,14 +1750,31 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionRejection, ActionResult, Activity, AgentId, ConfrontationOutcome, DialogueTone,
-        EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention, IntentionGoal,
-        MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction, Relationship, Tick, World,
-        WorldError,
+        ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
+        DialogueTone, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind, GoalTarget, Intention,
+        IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, ProposedAction,
+        Relationship, Tick, World, WorldError,
     };
-    use crate::sim::ActivityKind;
+    use crate::sim::{ActivityKind, BUSINESS_STARTING_CASH, STOCK_PER_SHIFT, WORK_WAGE};
     use std::collections::BTreeSet;
     use uuid::Uuid;
+
+    fn relocate(world: &mut World, agent: AgentId, destination: super::LocationId) {
+        let source = world.agents[&agent].location;
+        world
+            .locations
+            .get_mut(&source)
+            .expect("source")
+            .agents
+            .remove(&agent);
+        world
+            .locations
+            .get_mut(&destination)
+            .expect("destination")
+            .agents
+            .insert(agent);
+        world.agents.get_mut(&agent).expect("resident").location = destination;
+    }
 
     #[test]
     fn briar_glen_has_consistent_residents() {
@@ -1633,6 +1842,12 @@ mod tests {
         let mut world = World::briar_glen(2).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let start = world.tick;
+        let food_business = world
+            .locations
+            .values()
+            .find(|location| location.business.is_some() && location.is_open(world.tick.hour()))
+            .expect("open food business")
+            .id;
         let agent = world.agents.get_mut(&actor).expect("resident");
         agent.needs.food = 1.0;
         agent.needs.energy = 1.0;
@@ -1644,14 +1859,15 @@ mod tests {
         ));
         assert_eq!(world.agents[&actor].activity, None);
 
+        relocate(&mut world, actor, food_business);
         assert!(matches!(
-            world.execute(actor, ProposedAction::Eat),
+            world.execute(actor, ProposedAction::Purchase),
             ActionResult::Success(_)
         ));
         assert_eq!(
             world.agents[&actor].activity,
             Some(Activity {
-                kind: ActivityKind::Eating,
+                kind: ActivityKind::Shopping,
                 until: Tick(start.0 + 3),
             })
         );
@@ -1676,6 +1892,14 @@ mod tests {
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let actor = residents[0];
         let listener = residents[1];
+        let food_business = world
+            .locations
+            .values()
+            .find(|location| location.business.is_some() && location.is_open(world.tick.hour()))
+            .expect("open food business")
+            .id;
+        relocate(&mut world, actor, food_business);
+        relocate(&mut world, listener, food_business);
         let before = world.agents[&actor].needs.clone();
 
         world.advance_tick().expect("tick");
@@ -1696,20 +1920,210 @@ mod tests {
         assert!(world.agents[&actor].needs.companionship > companionship);
 
         let needs = world.agents[&actor].needs.clone();
-        world.execute(actor, ProposedAction::Eat);
+        world.execute(actor, ProposedAction::Purchase);
         assert!(world.agents[&actor].needs.food > needs.food);
         let energy = world.agents[&actor].needs.energy;
         let safety = world.agents[&actor].needs.safety;
+        let home = world.agents[&actor].home;
+        relocate(&mut world, actor, home);
         world.execute(actor, ProposedAction::Rest);
         assert!(world.agents[&actor].needs.energy > energy);
         assert!(world.agents[&actor].needs.safety > safety);
-        assert!(
-            world.agents[&listener]
-                .memories
-                .iter()
-                .any(|event| matches!(event.kind, EventKind::Ate { agent } if agent == actor))
-        );
+        assert!(world.agents[&listener].memories.iter().any(
+            |event| matches!(event.kind, EventKind::Purchased { agent, .. } if agent == actor)
+        ));
         world.validate().expect("normalized needs");
+    }
+
+    #[test]
+    fn work_and_purchases_transfer_coins_and_reject_atomically() {
+        let mut world = World::briar_glen(12).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let business = world.agents[&actor].workplace.expect("workplace");
+        assert!(world.locations[&business].business.is_some());
+        relocate(&mut world, actor, business);
+
+        let balance = world.agents[&actor].balance;
+        let initial_stock = world.locations[&business].business.expect("business").stock;
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Work),
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Worked {
+                    wage: WORK_WAGE,
+                    stock_produced: STOCK_PER_SHIFT,
+                    ..
+                })
+        ));
+        assert_eq!(world.agents[&actor].balance, balance + WORK_WAGE);
+        assert_eq!(
+            world.locations[&business].business.expect("business").stock,
+            initial_stock + STOCK_PER_SHIFT
+        );
+
+        let stock = world.locations[&business].business.expect("business").stock;
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Success(ref events)
+                if matches!(events[0].kind, EventKind::Purchased { cost: 5, .. })
+        ));
+        assert_eq!(world.agents[&actor].balance, balance + WORK_WAGE - 5);
+        assert_eq!(
+            world.locations[&business].business.expect("business"),
+            Business {
+                offering: Offering::Meal,
+                price: 5,
+                cash: BUSINESS_STARTING_CASH - WORK_WAGE + 5,
+                stock: stock - 1,
+                revenue: 5,
+                wages_paid: WORK_WAGE,
+            }
+        );
+
+        world.agents.get_mut(&actor).expect("resident").balance = 0;
+        let before = world.clone();
+        assert_eq!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Rejected(ActionRejection::InsufficientFunds {
+                cost: 5,
+                available: 0,
+            })
+        );
+        assert_eq!(world.agents[&actor].balance, before.agents[&actor].balance);
+        assert_eq!(world.locations[&business], before.locations[&business]);
+
+        world.agents.get_mut(&actor).expect("resident").balance = 5;
+        world
+            .locations
+            .get_mut(&business)
+            .expect("business")
+            .business
+            .as_mut()
+            .expect("ledger")
+            .stock = 0;
+        let before = world.clone();
+        assert_eq!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Rejected(ActionRejection::SoldOut(business))
+        );
+        assert_eq!(world.agents[&actor].balance, before.agents[&actor].balance);
+        assert_eq!(world.locations[&business], before.locations[&business]);
+
+        let ledger = world
+            .locations
+            .get_mut(&business)
+            .expect("business")
+            .business
+            .as_mut()
+            .expect("ledger");
+        ledger.cash = WORK_WAGE - 1;
+        let before = world.clone();
+        assert_eq!(
+            world.execute(actor, ProposedAction::Work),
+            ActionResult::Rejected(ActionRejection::InsolventEmployer {
+                location: business,
+                wage: WORK_WAGE,
+                available: WORK_WAGE - 1,
+            })
+        );
+        assert_eq!(world.agents[&actor].balance, before.agents[&actor].balance);
+        assert_eq!(world.locations[&business], before.locations[&business]);
+
+        let ledger = world
+            .locations
+            .get_mut(&business)
+            .expect("business")
+            .business
+            .as_mut()
+            .expect("ledger");
+        ledger.cash = u64::MAX;
+        ledger.stock = 1;
+        let before = world.clone();
+        assert_eq!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Rejected(ActionRejection::EconomyOverflow)
+        );
+        assert_eq!(world.agents[&actor].balance, before.agents[&actor].balance);
+        assert_eq!(world.locations[&business], before.locations[&business]);
+    }
+
+    #[test]
+    fn every_market_offering_transfers_value_and_work_restocks_it() {
+        for offering in [
+            Offering::Meal,
+            Offering::Supplies,
+            Offering::Repairs,
+            Offering::CivicServices,
+        ] {
+            let mut world = World::briar_glen(21).expect("town");
+            world.advance_to(Tick(8 * 12)).expect("business hours");
+            let location = world
+                .locations
+                .values()
+                .find(|location| {
+                    location.is_open(world.tick.hour())
+                        && location
+                            .business
+                            .is_some_and(|business| business.offering == offering)
+                })
+                .map(|location| location.id)
+                .expect("open offering");
+            let actor = world
+                .agents
+                .values()
+                .find(|agent| agent.workplace == Some(location))
+                .map(|agent| agent.id)
+                .expect("worker");
+            relocate(&mut world, actor, location);
+            let agent = world.agents.get_mut(&actor).expect("resident");
+            agent.balance = 100;
+            agent.needs.food = 0.1;
+            agent.needs.safety = 0.1;
+            agent.needs.status = 0.1;
+            agent.needs.companionship = 0.1;
+            let before_needs = agent.needs.clone();
+            let before = world.locations[&location].business.expect("business");
+
+            assert!(matches!(
+                world.execute(actor, ProposedAction::Purchase),
+                ActionResult::Success(ref events)
+                    if matches!(events[0].kind, EventKind::Purchased {
+                        offering: actual,
+                        cost,
+                        ..
+                    } if actual == offering && cost == before.price)
+            ));
+            let after_purchase = world.locations[&location].business.expect("business");
+            assert_eq!(world.agents[&actor].balance, 100 - before.price);
+            assert_eq!(after_purchase.cash, before.cash + before.price);
+            assert_eq!(after_purchase.revenue, before.revenue + before.price);
+            assert_eq!(after_purchase.stock, before.stock - 1);
+            match offering {
+                Offering::Meal => assert!(world.agents[&actor].needs.food > before_needs.food),
+                Offering::Supplies | Offering::Repairs => {
+                    assert!(world.agents[&actor].needs.safety > before_needs.safety)
+                }
+                Offering::CivicServices => {
+                    assert!(world.agents[&actor].needs.status > before_needs.status);
+                    assert!(world.agents[&actor].needs.companionship > before_needs.companionship);
+                }
+            }
+
+            assert!(matches!(
+                world.execute(actor, ProposedAction::Work),
+                ActionResult::Success(ref events)
+                    if matches!(events[0].kind, EventKind::Worked {
+                        stock_produced: STOCK_PER_SHIFT,
+                        ..
+                    })
+            ));
+            assert_eq!(
+                world.locations[&location]
+                    .business
+                    .expect("restocked")
+                    .stock,
+                after_purchase.stock + STOCK_PER_SHIFT
+            );
+        }
     }
 
     #[test]
@@ -1908,13 +2322,9 @@ mod tests {
         let actor = *world
             .agents
             .values()
-            .find(|agent| {
-                agent
-                    .workplace
-                    .is_some_and(|id| !world.locations[&id].serves_food)
-            })
+            .find(|agent| agent.workplace.is_some())
             .map(|agent| &agent.id)
-            .expect("non-food workplace");
+            .expect("worker");
         let workplace = world.agents[&actor].workplace.expect("workplace");
         world.advance_to(Tick(8 * 12)).expect("morning");
         assert!(matches!(
@@ -1933,10 +2343,10 @@ mod tests {
             ActionResult::Success(_)
         ));
         assert!(world.agents[&actor].needs.money > needs.money);
-        assert_eq!(
-            world.execute(actor, ProposedAction::Eat),
-            ActionResult::Rejected(ActionRejection::CannotEatHere(workplace))
-        );
+        assert!(matches!(
+            world.execute(actor, ProposedAction::Purchase),
+            ActionResult::Success(_)
+        ));
         assert_eq!(
             world.execute(actor, ProposedAction::Rest),
             ActionResult::Rejected(ActionRejection::CannotRestHere(workplace))
@@ -1995,7 +2405,7 @@ mod tests {
         ));
         world.advance_to(Tick(23 * 12)).expect("closing time");
         assert_eq!(
-            world.execute(actor, ProposedAction::Eat),
+            world.execute(actor, ProposedAction::Purchase),
             ActionResult::Rejected(ActionRejection::LocationClosed(tavern))
         );
         assert!(matches!(
@@ -2074,7 +2484,14 @@ mod tests {
                 .any(|memory| matches!(memory.kind, EventKind::Spoke { .. }))
         );
 
-        world.append_event(Some(home), EventKind::Worked { agent: speaker });
+        world.append_event(
+            Some(home),
+            EventKind::Worked {
+                agent: speaker,
+                wage: WORK_WAGE,
+                stock_produced: 0,
+            },
+        );
         let belief = world.agents[&listener].beliefs[&speaker];
         assert!(belief.reliability > 0.5);
         assert_eq!(belief.confidence, 0.3);
@@ -2102,7 +2519,14 @@ mod tests {
         let subject = residents[0];
         let first_listener = residents[2];
         let second_listener = residents[3];
-        let fact = world.append_event(None, EventKind::Worked { agent: subject });
+        let fact = world.append_event(
+            None,
+            EventKind::Worked {
+                agent: subject,
+                wage: WORK_WAGE,
+                stock_produced: 0,
+            },
+        );
 
         world.execute(
             subject,
@@ -2188,7 +2612,14 @@ mod tests {
                 .expect("target")
                 .personality
                 .honesty = honesty;
-            let fact = world.append_event(None, EventKind::Worked { agent: target });
+            let fact = world.append_event(
+                None,
+                EventKind::Worked {
+                    agent: target,
+                    wage: WORK_WAGE,
+                    stock_produced: 0,
+                },
+            );
             world.execute(
                 target,
                 ProposedAction::Talk {
