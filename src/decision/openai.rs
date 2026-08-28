@@ -11,29 +11,18 @@ Prioritize urgent needs, then feasible active goals. Each goal has a concrete ty
 React to town_event when present: shelter at home during storms, socialize during festivals, expect reduced production during shortages, and favor work during market days. remaining_ticks says how long the condition lasts.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
-The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use pursue for multi-step travel, purchases, rest, or work so the simulation can continue it without another decision. Move only to a move_to ID, talk only to a talk_to ID, and propose purchase, consume_meal, use_supplies, use_repair_kit, use_medicine, seek_treatment, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
+The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Choose a durable intention that local simulation can pursue without another model call. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use route-hint destinations for multi-step travel or purchases. Rest, work, and treatment must be currently feasible or reachable. Observe only the current location or a visible agent.
 For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
-{"action":"move","destination":"location UUID"}
-{"action":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}
-{"action":"confront","target":"agent UUID","claim":"event UUID"}
-{"action":"observe","target":{"target":"agent","id":"agent UUID"}}
-{"action":"observe","target":{"target":"location","id":"location UUID"}}
-{"action":"purchase"}
-{"action":"consume_meal"}
-{"action":"use_supplies"}
-{"action":"use_repair_kit"}
-{"action":"use_medicine"}
-{"action":"seek_treatment"}
-{"action":"rest"}
-{"action":"work"}
 {"action":"pursue","intention":{"goal":"visit","destination":"location UUID"}}
 {"action":"pursue","intention":{"goal":"purchase","destination":"route hint destination UUID"}}
 {"action":"pursue","intention":{"goal":"rest"}}
 {"action":"pursue","intention":{"goal":"work"}}
 {"action":"pursue","intention":{"goal":"seek_treatment"}}
 {"action":"pursue","intention":{"goal":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}}
-{"action":"wait"}
+{"action":"pursue","intention":{"goal":"confront","target":"agent UUID","claim":"event UUID"}}
+{"action":"pursue","intention":{"goal":"observe","target":{"target":"agent","id":"agent UUID"}}}
+{"action":"pursue","intention":{"goal":"observe","target":{"target":"location","id":"location UUID"}}}
 The simulation validates your proposal and remains authoritative."#;
 
 pub struct OpenAiDecisionEngine {
@@ -396,24 +385,24 @@ mod tests {
             assert!(request.contains("Beliefs are subjective estimates"));
             assert!(request.contains("treat them as hearsay"));
             assert!(request.contains("Confront only an exact target and claim pair"));
-            assert!(request.contains(r#"{\"action\":\"confront\""#));
+            assert!(request.contains(r#"\"goal\":\"confront\""#));
             assert!(request.contains(r#"\"rumors\":"#));
             assert!(request.contains(r#"\"confront\":"#));
             assert!(request.contains("Each goal has a concrete typed target"));
             assert!(request.contains(r#"\"required\":"#));
             assert!(request.contains(r#"\"expires_at\":"#));
             assert!(request.contains("Each route hint has a final destination"));
-            assert!(request.contains("Use pursue for multi-step travel"));
+            assert!(request.contains("Choose a durable intention"));
             assert!(request.contains(r#"\"destination\":"#));
             assert!(request.contains(r#"\"next_hop\":"#));
-            assert!(request.contains("Move only to a move_to ID"));
-            assert!(request.contains("when its can_* value is true"));
+            assert!(request.contains("Use route-hint destinations"));
             assert!(request.contains(r#"\"local_time\":{\"day\":1,\"hour\":7,\"minute\":0}"#));
             assert!(request.contains(r#"\"opening_hours\":"#));
             assert!(request.contains(r#"\"is_open\":"#));
             assert!(request.contains(r#"\"action_affordances\":{\"move_to\":["#));
             assert!(request.contains(r#"\"town_event\":"#));
             assert!(request.contains(r#"\"inventory\":"#));
+            assert!(!request.contains("llm_intention"));
             assert!(!request.contains(r#"\"routing\":"#));
             assert!(request.contains(r#"\"can_consume_meal\":"#));
             assert!(request.contains(r#"\"can_use_medicine\":"#));

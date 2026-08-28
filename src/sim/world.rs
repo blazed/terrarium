@@ -1,10 +1,11 @@
 use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, BUSINESS_STARTING_CASH, Business,
-    ConfrontationOutcome, DeathCause, DialogueTone, DiseaseState, Event, EventId, EventKind, Goal,
-    GoalKind, GoalTarget, Intention, IntentionGoal, Inventory, Item, LifeState, Location,
-    LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
-    Offering, OpeningHours, Personality, ProposedAction, Relationship, RoutingStats, Rumor,
-    STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent, TownEventKind, WORK_WAGE, seeded_uuid,
+    ConfrontationOutcome, DeathCause, Decision, DecisionSource, DialogueTone, DiseaseState, Event,
+    EventId, EventKind, Goal, GoalKind, GoalTarget, Intention, IntentionGoal, Inventory, Item,
+    LifeState, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs,
+    ObservationTarget, Occupation, Offering, OpeningHours, Personality, ProposedAction,
+    Relationship, RoutingStats, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent,
+    TownEventKind, WORK_WAGE, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -213,6 +214,7 @@ impl World {
                 inventory: Inventory::default(),
                 activity: None,
                 intention: None,
+                llm_intention: false,
                 mood: 0.0,
                 relationships: BTreeMap::new(),
                 beliefs: BTreeMap::new(),
@@ -447,7 +449,21 @@ impl World {
                 .as_ref()
                 .is_some_and(|intention| intention.expires_at <= proposed)
             {
+                if agent.llm_intention {
+                    if agent
+                        .intention
+                        .as_ref()
+                        .is_some_and(|intention| matches!(intention.goal, IntentionGoal::Work))
+                    {
+                        agent.routing.llm_intentions_completed =
+                            agent.routing.llm_intentions_completed.saturating_add(1);
+                    } else {
+                        agent.routing.llm_intentions_interrupted =
+                            agent.routing.llm_intentions_interrupted.saturating_add(1);
+                    }
+                }
                 agent.intention = None;
+                agent.llm_intention = false;
             }
             agent.goals.retain(|goal| goal.expires_at > proposed);
             let critical_needs = [agent.needs.food, agent.needs.energy, agent.needs.safety]
@@ -482,7 +498,12 @@ impl World {
                 };
                 agent.disease = DiseaseState::Susceptible;
                 agent.activity = None;
+                if agent.llm_intention {
+                    agent.routing.llm_intentions_interrupted =
+                        agent.routing.llm_intentions_interrupted.saturating_add(1);
+                }
                 agent.intention = None;
+                agent.llm_intention = false;
                 agent.goals.clear();
                 deaths.push((agent.id, agent.location, cause));
             }
@@ -503,10 +524,17 @@ impl World {
             if agent.intention.as_ref().is_some_and(|intention| {
                 matches!(
                     intention.goal,
-                    IntentionGoal::Talk { target, .. } if deceased.contains(&target)
+                    IntentionGoal::Talk { target, .. }
+                        | IntentionGoal::Confront { target, .. }
+                        if deceased.contains(&target)
                 )
             }) {
+                if agent.llm_intention {
+                    agent.routing.llm_intentions_interrupted =
+                        agent.routing.llm_intentions_interrupted.saturating_add(1);
+                }
                 agent.intention = None;
+                agent.llm_intention = false;
             }
         }
         let agents = self
@@ -536,7 +564,12 @@ impl World {
             self.active_town_event = Some(event);
             if event.kind == TownEventKind::Storm {
                 for agent in self.agents.values_mut() {
+                    if agent.llm_intention {
+                        agent.routing.llm_intentions_interrupted =
+                            agent.routing.llm_intentions_interrupted.saturating_add(1);
+                    }
                     agent.intention = None;
+                    agent.llm_intention = false;
                 }
             }
             self.append_event(
@@ -722,6 +755,15 @@ impl World {
         }
     }
 
+    pub fn execute_decision(&mut self, actor: AgentId, decision: Decision) -> ActionResult {
+        match decision.action {
+            ProposedAction::Pursue { intention } => {
+                self.start_intention(actor, intention, decision.source == DecisionSource::Llm)
+            }
+            action => self.execute(actor, action),
+        }
+    }
+
     pub fn execute(&mut self, actor: AgentId, action: ProposedAction) -> ActionResult {
         let Some(agent) = self.agents.get(&actor) else {
             return self.reject(actor, None, ActionRejection::UnknownActor(actor));
@@ -737,7 +779,7 @@ impl World {
 
         let kind = match action {
             ProposedAction::Pursue { intention } => {
-                return self.start_intention(actor, intention);
+                return self.start_intention(actor, intention, false);
             }
             ProposedAction::Move { destination } => {
                 let Some(destination_location) = self.locations.get(&destination) else {
@@ -1215,27 +1257,51 @@ impl World {
         ActionResult::Success(events)
     }
 
-    fn start_intention(&mut self, actor: AgentId, goal: IntentionGoal) -> ActionResult {
+    fn start_intention(
+        &mut self,
+        actor: AgentId,
+        goal: IntentionGoal,
+        llm_intention: bool,
+    ) -> ActionResult {
         let expires_at = Tick(self.tick.0.saturating_add(INTENTION_DURATION_TICKS));
         let intention = Intention { goal, expires_at };
         if let Err(rejection) = self.intention_action(actor, &intention) {
             let location = self.agents.get(&actor).map(|agent| agent.location);
             return self.reject(actor, location, rejection);
         }
-        self.agents
+        let agent = self
+            .agents
             .get_mut(&actor)
-            .expect("validated intention actor")
-            .intention = Some(intention);
-        self.continue_intention(actor)
+            .expect("validated intention actor");
+        agent.intention = Some(intention);
+        agent.llm_intention = llm_intention;
+        if llm_intention {
+            agent.routing.llm_intentions_started =
+                agent.routing.llm_intentions_started.saturating_add(1);
+        }
+        self.continue_intention_inner(actor, false)
             .unwrap_or_else(|| self.execute(actor, ProposedAction::Wait))
     }
 
     pub fn continue_intention(&mut self, actor: AgentId) -> Option<ActionResult> {
+        self.continue_intention_inner(actor, true)
+    }
+
+    fn continue_intention_inner(
+        &mut self,
+        actor: AgentId,
+        follow_up: bool,
+    ) -> Option<ActionResult> {
         if !self.agents.get(&actor).is_some_and(Agent::is_alive) {
             return None;
         }
         let intention = self.agents.get(&actor)?.intention.clone()?;
-        let needs = &self.agents.get(&actor)?.needs;
+        let agent = self.agents.get_mut(&actor)?;
+        if follow_up && agent.llm_intention {
+            agent.routing.llm_intention_steps = agent.routing.llm_intention_steps.saturating_add(1);
+        }
+        let needs = &agent.needs;
+        let medical_need = agent.health < 0.5 || agent.injury || agent.disease.is_symptomatic();
         let purchase_offering = match intention.goal {
             IntentionGoal::Purchase { destination } => self
                 .locations
@@ -1250,32 +1316,66 @@ impl World {
                 && !matches!(
                     purchase_offering,
                     Some(Offering::Supplies | Offering::Repairs)
+                ))
+            || (medical_need
+                && !matches!(
+                    &intention.goal,
+                    IntentionGoal::SeekTreatment | IntentionGoal::Rest
                 ));
         if intention.expires_at <= self.tick || interrupted {
-            self.agents.get_mut(&actor)?.intention = None;
+            self.clear_intention(
+                actor,
+                !interrupted && matches!(intention.goal, IntentionGoal::Work),
+            );
             return None;
         }
         let action = match self.intention_action(actor, &intention) {
             Ok(Some(action)) => action,
             Ok(None) => {
-                self.agents.get_mut(&actor)?.intention = None;
+                self.clear_intention(actor, true);
                 return None;
             }
             Err(rejection) => {
                 let location = self.agents.get(&actor).map(|agent| agent.location);
-                self.agents.get_mut(&actor)?.intention = None;
+                self.clear_intention(actor, false);
                 return Some(self.reject(actor, location, rejection));
             }
         };
         let terminal = !matches!(action, ProposedAction::Move { .. });
         let result = self.execute(actor, action);
-        let completed = terminal
-            || matches!(result, ActionResult::Rejected(_))
-            || self.intention_complete(actor, &intention.goal);
-        if completed && let Some(agent) = self.agents.get_mut(&actor) {
-            agent.intention = None;
+        let rejected = matches!(result, ActionResult::Rejected(_));
+        let durable = self
+            .agents
+            .get(&actor)
+            .is_some_and(|agent| agent.llm_intention);
+        let completed = rejected
+            || self.intention_complete(actor, &intention.goal)
+            || (terminal
+                && (!durable
+                    || !matches!(intention.goal, IntentionGoal::Rest | IntentionGoal::Work)))
+            || (durable
+                && matches!(intention.goal, IntentionGoal::Rest)
+                && self.agents[&actor].needs.energy >= 0.8);
+        if completed {
+            self.clear_intention(actor, !rejected);
         }
         Some(result)
+    }
+
+    fn clear_intention(&mut self, actor: AgentId, completed: bool) {
+        if let Some(agent) = self.agents.get_mut(&actor) {
+            if agent.llm_intention {
+                if completed {
+                    agent.routing.llm_intentions_completed =
+                        agent.routing.llm_intentions_completed.saturating_add(1);
+                } else {
+                    agent.routing.llm_intentions_interrupted =
+                        agent.routing.llm_intentions_interrupted.saturating_add(1);
+                }
+            }
+            agent.intention = None;
+            agent.llm_intention = false;
+        }
     }
 
     fn intention_action(
@@ -1342,6 +1442,13 @@ impl World {
                 target: *target,
                 tone: *tone,
                 message: message.clone(),
+            })),
+            IntentionGoal::Observe { target } => Ok(Some(ProposedAction::Observe {
+                target: target.clone(),
+            })),
+            IntentionGoal::Confront { target, claim } => Ok(Some(ProposedAction::Confront {
+                target: *target,
+                claim: *claim,
             })),
         }
     }
@@ -2271,6 +2378,12 @@ impl World {
                     .last_llm_attempt
                     .is_some_and(|tick| tick > self.tick || tick.day() != agent.routing.budget_day)
                 || (agent.routing.llm_calls_today > 0 && agent.routing.last_llm_attempt.is_none())
+                || agent
+                    .routing
+                    .llm_intentions_completed
+                    .saturating_add(agent.routing.llm_intentions_interrupted)
+                    > agent.routing.llm_intentions_started
+                || (agent.llm_intention && agent.intention.is_none())
             {
                 return Err(WorldError::InvalidState(format!(
                     "agent {id} has invalid LLM routing state"
@@ -2308,6 +2421,15 @@ impl World {
                             && !message.trim().is_empty()
                             && !message.chars().any(char::is_control)
                             && message.chars().count() <= MAX_TALK_MESSAGE_CHARS
+                    }
+                    IntentionGoal::Observe { target } => match target {
+                        ObservationTarget::Agent(target) => self.agents.contains_key(target),
+                        ObservationTarget::Location(target) => self.locations.contains_key(target),
+                    },
+                    IntentionGoal::Confront { target, claim } => {
+                        target != id
+                            && self.agents.get(target).is_some_and(Agent::is_alive)
+                            && self.events.iter().any(|event| event.id == *claim)
                     }
                 };
                 if intention.expires_at <= self.tick || !target_is_valid {
@@ -2395,11 +2517,11 @@ impl World {
 mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, Business, ConfrontationOutcome,
-        DeathCause, DialogueTone, DiseaseState, EventId, EventKind, GOAL_LIMIT, Goal, GoalKind,
-        GoalTarget, IMMUNITY_TICKS, INCUBATION_TICKS, Intention, IntentionGoal, Item, LifeState,
-        MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, PATIENT_ZERO_TICK, ProposedAction,
-        RECOVERY_TICKS, Relationship, SYMPTOMATIC_TICKS, Tick, TownEvent, TownEventKind, World,
-        WorldError,
+        DeathCause, Decision, DialogueTone, DiseaseState, EventId, EventKind, GOAL_LIMIT, Goal,
+        GoalKind, GoalTarget, IMMUNITY_TICKS, INCUBATION_TICKS, Intention, IntentionGoal, Item,
+        LifeState, MAX_TALK_MESSAGE_CHARS, ObservationTarget, Offering, PATIENT_ZERO_TICK,
+        ProposedAction, RECOVERY_TICKS, Relationship, SYMPTOMATIC_TICKS, Tick, TownEvent,
+        TownEventKind, World, WorldError,
     };
     use crate::sim::{
         ActivityKind, BUSINESS_STARTING_CASH, MAX_ITEMS_PER_KIND, STOCK_PER_SHIFT, Scheduler,
@@ -3211,6 +3333,69 @@ mod tests {
             2
         );
         world.validate().expect("valid completed intention");
+    }
+
+    #[test]
+    fn llm_rest_and_work_intentions_continue_until_a_boundary() {
+        let mut world = World::briar_glen(3).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let home = world.agents[&actor].home;
+        world.relocate(actor, home);
+        world.agents.get_mut(&actor).expect("resident").needs.energy = 0.2;
+        world.execute(
+            actor,
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Rest,
+            },
+        );
+        assert!(world.agents[&actor].intention.is_none());
+        world.agents.get_mut(&actor).expect("resident").needs.energy = 0.2;
+
+        world.execute_decision(
+            actor,
+            Decision::llm(ProposedAction::Pursue {
+                intention: IntentionGoal::Rest,
+            }),
+        );
+        assert!(world.agents[&actor].intention.is_some());
+        assert!(world.continue_intention(actor).is_some());
+        assert!(world.agents[&actor].intention.is_some());
+        assert!(world.continue_intention(actor).is_some());
+        assert!(world.agents[&actor].intention.is_none());
+        assert_eq!(world.agents[&actor].routing.llm_intentions_started, 1);
+        assert_eq!(world.agents[&actor].routing.llm_intention_steps, 2);
+        assert_eq!(world.agents[&actor].routing.llm_intentions_completed, 1);
+
+        let workplace = world.agents[&actor].workplace.expect("workplace");
+        world.relocate(actor, workplace);
+        world.execute_decision(
+            actor,
+            Decision::llm(ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
+            }),
+        );
+        assert!(world.continue_intention(actor).is_some());
+        assert!(world.agents[&actor].intention.is_some());
+        world.agents.get_mut(&actor).expect("resident").needs.safety = 0.05;
+        assert!(world.continue_intention(actor).is_none());
+        assert_eq!(world.agents[&actor].routing.llm_intentions_interrupted, 1);
+
+        world.agents.get_mut(&actor).expect("resident").needs.safety = 1.0;
+        world.execute_decision(
+            actor,
+            Decision::llm(ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
+            }),
+        );
+        let expires_at = world.agents[&actor]
+            .intention
+            .as_ref()
+            .expect("work intention")
+            .expires_at;
+        world.advance_to(expires_at).expect("work boundary");
+        assert!(world.agents[&actor].intention.is_none());
+        assert_eq!(world.agents[&actor].routing.llm_intentions_completed, 2);
+        world.validate().expect("valid intention telemetry");
     }
 
     #[test]

@@ -56,7 +56,7 @@ pub async fn run_simulation_with_events(
                     .routing
                     .record(world.tick, decision.source);
                 debug!(?agent, ?decision.action, "executing proposed action");
-                world.execute(agent, decision.action);
+                world.execute_decision(agent, decision);
             }
             world.validate()?;
             for event in &world.events()[previous_events..] {
