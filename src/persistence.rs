@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use std::{num::ParseIntError, path::Path};
 use thiserror::Error;
 
-const CHECKPOINT_VERSION: i64 = 1;
+const CHECKPOINT_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
@@ -58,7 +58,7 @@ pub fn save_world(path: impl AsRef<Path>, world: &World) -> Result<(), Persisten
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         "PRAGMA foreign_keys = ON;
-         PRAGMA user_version = 1;
+         PRAGMA user_version = 2;
          CREATE TABLE IF NOT EXISTS world (
              id INTEGER PRIMARY KEY CHECK (id = 1),
              name TEXT NOT NULL,
@@ -178,7 +178,11 @@ fn load_json_rows<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::{PersistenceError, load_run, load_world, save_world};
-    use crate::{decision::RandomDecisionEngine, runner::run_simulation, sim::World};
+    use crate::{
+        decision::RandomDecisionEngine,
+        runner::run_simulation,
+        sim::{Intention, IntentionGoal, Tick, World},
+    };
     use rusqlite::Connection;
     use std::{env, fs, path::PathBuf};
 
@@ -192,9 +196,14 @@ mod tests {
         let _ = fs::remove_file(&path);
         let world = World::briar_glen(u64::MAX).expect("town");
         let mut engine = RandomDecisionEngine::new(u64::MAX);
-        let world = run_simulation(world, 50, &mut engine)
+        let mut world = run_simulation(world, 50, &mut engine)
             .await
             .expect("simulation");
+        let actor = *world.agents.keys().next().expect("resident");
+        world.agents.get_mut(&actor).expect("resident").intention = Some(Intention {
+            goal: IntentionGoal::Rest,
+            expires_at: Tick(world.tick.0 + 10),
+        });
 
         save_world(&path, &world).expect("save");
         let stored = load_run(&path).expect("load");
@@ -213,6 +222,7 @@ mod tests {
         assert_eq!(stored.events, world.events());
         assert!(stored.agents.iter().any(|agent| !agent.memories.is_empty()));
         assert!(stored.agents.iter().any(|agent| agent.activity.is_some()));
+        assert_eq!(load_world(&path).expect("checkpoint"), world);
         fs::remove_file(path).expect("cleanup");
     }
 
@@ -263,15 +273,15 @@ mod tests {
 
         let connection = Connection::open(&path).expect("database");
         connection
-            .execute_batch("PRAGMA user_version = 2")
+            .execute_batch("PRAGMA user_version = 3")
             .expect("version");
         assert!(matches!(
             load_world(&path),
-            Err(PersistenceError::UnsupportedCheckpointVersion(2))
+            Err(PersistenceError::UnsupportedCheckpointVersion(3))
         ));
 
         connection
-            .execute_batch("PRAGMA user_version = 1; UPDATE world SET tick = '0'")
+            .execute_batch("PRAGMA user_version = 2; UPDATE world SET tick = '0'")
             .expect("corrupt checkpoint");
         assert!(matches!(
             load_world(&path),

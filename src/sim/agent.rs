@@ -1,4 +1,4 @@
-use super::{AgentId, Event, EventKind, LocationId, Relationship, Tick};
+use super::{AgentId, Event, EventKind, Intention, LocationId, Relationship, Tick};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
@@ -229,6 +229,7 @@ pub struct Agent {
     pub needs: Needs,
     #[serde(default)]
     pub activity: Option<Activity>,
+    pub intention: Option<Intention>,
     #[serde(default)]
     pub mood: f32,
     pub relationships: BTreeMap<AgentId, Relationship>,

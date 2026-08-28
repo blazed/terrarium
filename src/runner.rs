@@ -32,17 +32,19 @@ pub async fn run_simulation_with_events(
     for _ in 0..ticks {
         world.advance_tick()?;
         for agent in scheduler.agents_to_act(&world) {
-            let observation = perceive(&world, agent)?;
-            let action = match engine.decide(&observation).await {
-                Ok(action) => action,
-                Err(error) => {
-                    warn!(?agent, %error, "decision failed; waiting instead");
-                    ProposedAction::Wait
-                }
-            };
-            debug!(?agent, ?action, "executing proposed action");
             let previous_events = world.events().len();
-            world.execute(agent, action);
+            if world.continue_intention(agent).is_none() {
+                let observation = perceive(&world, agent)?;
+                let action = match engine.decide(&observation).await {
+                    Ok(action) => action,
+                    Err(error) => {
+                        warn!(?agent, %error, "decision failed; waiting instead");
+                        ProposedAction::Wait
+                    }
+                };
+                debug!(?agent, ?action, "executing proposed action");
+                world.execute(agent, action);
+            }
             world.validate()?;
             for event in &world.events()[previous_events..] {
                 on_event(&world, event);
@@ -58,7 +60,7 @@ mod tests {
     use crate::{
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
-        sim::{EventKind, ProposedAction, World},
+        sim::{EventKind, Intention, IntentionGoal, ProposedAction, Tick, World},
     };
 
     #[tokio::test]
@@ -135,6 +137,56 @@ mod tests {
             assert!(!signatures.contains(&signature));
             signatures.push(signature);
         }
+    }
+
+    struct CountingEngine(usize);
+
+    impl DecisionEngine for CountingEngine {
+        async fn decide(
+            &mut self,
+            _observation: &AgentObservation,
+        ) -> Result<ProposedAction, DecisionError> {
+            self.0 += 1;
+            Ok(ProposedAction::Wait)
+        }
+    }
+
+    #[tokio::test]
+    async fn continued_intentions_skip_new_decisions() {
+        let mut world = World::briar_glen(1).expect("town");
+        world.advance_to(Tick(12 * 12)).expect("noon");
+        let actor = world
+            .agents
+            .values()
+            .nth((world.tick.0 as usize + 1) % world.agents.len())
+            .expect("scheduled resident")
+            .id;
+        let destination = world
+            .locations
+            .values()
+            .find(|location| location.name == "Town Hall")
+            .expect("town hall")
+            .id;
+        let agent = world.agents.get_mut(&actor).expect("resident");
+        agent.needs.food = 1.0;
+        agent.needs.energy = 1.0;
+        agent.needs.safety = 1.0;
+        agent.intention = Some(Intention {
+            goal: IntentionGoal::Visit { destination },
+            expires_at: Tick(world.tick.0 + 36),
+        });
+        let mut engine = CountingEngine(0);
+
+        let world = run_simulation(world, 1, &mut engine)
+            .await
+            .expect("simulation");
+
+        assert_eq!(engine.0, 0);
+        assert!(world.agents[&actor].intention.is_some());
+        assert!(matches!(
+            world.events().last().expect("movement").kind,
+            EventKind::Moved { agent, .. } if agent == actor
+        ));
     }
 
     struct FailingEngine;

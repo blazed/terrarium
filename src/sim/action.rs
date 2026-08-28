@@ -1,4 +1,4 @@
-use super::{AgentId, Event, LocationId};
+use super::{AgentId, Event, LocationId, Tick};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TALK_MESSAGE_CHARS: usize = 200;
@@ -32,6 +32,30 @@ pub enum ObservationTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "goal", rename_all = "snake_case")]
+pub enum IntentionGoal {
+    Visit {
+        destination: LocationId,
+    },
+    Eat {
+        destination: LocationId,
+    },
+    Rest,
+    Work,
+    Talk {
+        target: AgentId,
+        tone: DialogueTone,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Intention {
+    pub goal: IntentionGoal,
+    pub expires_at: Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProposedAction {
     Move {
@@ -52,6 +76,9 @@ pub enum ProposedAction {
     Eat,
     Rest,
     Work,
+    Pursue {
+        intention: IntentionGoal,
+    },
     Wait,
 }
 
@@ -79,6 +106,11 @@ pub enum ActionRejection {
     },
     #[error("location {0} is closed")]
     LocationClosed(LocationId),
+    #[error("no open route from {from} to {destination}")]
+    NoRoute {
+        from: LocationId,
+        destination: LocationId,
+    },
     #[error("agent cannot eat at location {0}")]
     CannotEatHere(LocationId),
     #[error("agent cannot rest at location {0}")]

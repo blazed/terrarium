@@ -1,7 +1,7 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
-    cognition::{AgentObservation, VisibleAgent},
-    sim::{DialogueTone, GoalKind, LocationId, ObservationTarget, ProposedAction},
+    cognition::{AgentObservation, RouteHint, VisibleAgent},
+    sim::{DialogueTone, GoalKind, IntentionGoal, ObservationTarget, ProposedAction},
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -29,12 +29,16 @@ impl DecisionEngine for RandomDecisionEngine {
         let needs = &observation.self_description.needs;
         let personality = &observation.self_description.personality;
         let mood = observation.self_description.mood;
-        let follow_route = |next_hop: Option<LocationId>| {
-            next_hop
-                .filter(|destination| observation.action_affordances.move_to.contains(destination))
-                .map_or(ProposedAction::Wait, |destination| ProposedAction::Move {
-                    destination,
-                })
+        let follow_route = |hint: Option<RouteHint>, goal: fn(RouteHint) -> IntentionGoal| {
+            hint.filter(|hint| {
+                observation
+                    .action_affordances
+                    .move_to
+                    .contains(&hint.next_hop)
+            })
+            .map_or(ProposedAction::Wait, |hint| ProposedAction::Pursue {
+                intention: goal(hint),
+            })
         };
         let relationship_score = |agent: &VisibleAgent| {
             let relationship = agent.relationship;
@@ -68,14 +72,18 @@ impl DecisionEngine for RandomDecisionEngine {
             if observation.action_affordances.can_eat {
                 return Ok(ProposedAction::Eat);
             }
-            return Ok(follow_route(observation.route_hints.food));
+            return Ok(follow_route(observation.route_hints.food, |hint| {
+                IntentionGoal::Eat {
+                    destination: hint.destination,
+                }
+            }));
         }
         if needs.energy < 0.2 + 0.1 * personality.neuroticism {
             return Ok(
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    follow_route(observation.route_hints.home)
+                    follow_route(observation.route_hints.home, |_| IntentionGoal::Rest)
                 },
             );
         }
@@ -118,7 +126,7 @@ impl DecisionEngine for RandomDecisionEngine {
                 if observation.current_location.id == observation.self_description.home.id {
                     ProposedAction::Rest
                 } else {
-                    follow_route(observation.route_hints.home)
+                    follow_route(observation.route_hints.home, |_| IntentionGoal::Rest)
                 },
             );
         }
@@ -150,7 +158,9 @@ impl DecisionEngine for RandomDecisionEngine {
                             return Ok(ProposedAction::Work);
                         }
                         if observation.route_hints.workplace.is_some() {
-                            return Ok(follow_route(observation.route_hints.workplace));
+                            return Ok(follow_route(observation.route_hints.workplace, |_| {
+                                IntentionGoal::Work
+                            }));
                         }
                     }
                 }
@@ -177,7 +187,11 @@ impl DecisionEngine for RandomDecisionEngine {
                     return Ok(ProposedAction::Eat);
                 }
                 GoalKind::Wellbeing if observation.route_hints.food.is_some() => {
-                    return Ok(follow_route(observation.route_hints.food));
+                    return Ok(follow_route(observation.route_hints.food, |hint| {
+                        IntentionGoal::Eat {
+                            destination: hint.destination,
+                        }
+                    }));
                 }
                 _ => {}
             }
@@ -190,7 +204,7 @@ impl DecisionEngine for RandomDecisionEngine {
             return Ok(if observation.action_affordances.can_work {
                 ProposedAction::Work
             } else {
-                follow_route(observation.route_hints.workplace)
+                follow_route(observation.route_hints.workplace, |_| IntentionGoal::Work)
             });
         }
 
@@ -334,8 +348,8 @@ mod tests {
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, perceive},
         sim::{
-            Belief, DialogueTone, EventId, GoalKind, ObservationTarget, ProposedAction,
-            Relationship, Tick, World,
+            Belief, DialogueTone, EventId, GoalKind, IntentionGoal, ObservationTarget,
+            ProposedAction, Relationship, Tick, World,
         },
     };
     use uuid::Uuid;
@@ -443,8 +457,9 @@ mod tests {
 
         let observation = perceive(&world, actor).expect("observation");
         let next_hop = observation.route_hints.workplace.expect("route");
-        assert_ne!(
-            next_hop,
+        assert_ne!(next_hop.next_hop, next_hop.destination);
+        assert_eq!(
+            next_hop.destination,
             observation
                 .self_description
                 .workplace
@@ -457,8 +472,8 @@ mod tests {
                 .decide(&observation)
                 .await
                 .expect("decision"),
-            ProposedAction::Move {
-                destination: next_hop
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
             }
         );
     }
@@ -502,8 +517,8 @@ mod tests {
             .id;
         assert_eq!(
             engine.decide(&working).await.expect("decision"),
-            ProposedAction::Move {
-                destination: workplace
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
             }
         );
 
@@ -524,8 +539,8 @@ mod tests {
         let heading_home = perceive(&world, actor).expect("observation");
         assert_eq!(
             engine.decide(&heading_home).await.expect("decision"),
-            ProposedAction::Move {
-                destination: heading_home.self_description.home.id
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Rest,
             }
         );
 
@@ -601,13 +616,8 @@ mod tests {
         purposeful.self_description.personality.ambition = 1.0;
         assert_eq!(
             engine.decide(&purposeful).await.expect("decision"),
-            ProposedAction::Move {
-                destination: purposeful
-                    .self_description
-                    .workplace
-                    .as_ref()
-                    .expect("workplace")
-                    .id
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Work,
             }
         );
 

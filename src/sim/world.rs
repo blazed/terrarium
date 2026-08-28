@@ -1,15 +1,16 @@
 use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, ConfrontationOutcome, DialogueTone,
-    Event, EventId, EventKind, Goal, GoalKind, Location, LocationId, MAX_TALK_MESSAGE_CHARS,
-    NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation, OpeningHours, Personality,
-    ProposedAction, Relationship, Rumor, Tick, seeded_uuid,
+    Event, EventId, EventKind, Goal, GoalKind, Intention, IntentionGoal, Location, LocationId,
+    MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs, ObservationTarget, Occupation,
+    OpeningHours, Personality, ProposedAction, Relationship, Rumor, Tick, seeded_uuid,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use thiserror::Error;
 
 const MEMORY_LIMIT: usize = 20;
 const RUMOR_LIMIT: usize = 20;
+const INTENTION_DURATION_TICKS: u64 = 36;
 
 pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32)> {
     match kind {
@@ -173,6 +174,7 @@ impl World {
                     energy: vary_need(0.8),
                 },
                 activity: None,
+                intention: None,
                 mood: 0.0,
                 relationships: BTreeMap::new(),
                 beliefs: BTreeMap::new(),
@@ -241,6 +243,19 @@ impl World {
                 .is_some_and(|activity| activity.until <= proposed || urgent)
             {
                 agent.activity = None;
+            }
+            let interrupt_intention = agent.intention.as_ref().is_some_and(|intention| {
+                let urgent_conflict = match &intention.goal {
+                    IntentionGoal::Eat { .. } => {
+                        agent.needs.energy < 0.1 || agent.needs.safety < 0.1
+                    }
+                    IntentionGoal::Rest => agent.needs.food < 0.1 || agent.needs.safety < 0.1,
+                    _ => urgent,
+                };
+                intention.expires_at <= proposed || urgent_conflict
+            });
+            if interrupt_intention {
+                agent.intention = None;
             }
         }
         self.tick = proposed;
@@ -355,6 +370,9 @@ impl World {
         let current = agent.location;
 
         let kind = match action {
+            ProposedAction::Pursue { intention } => {
+                return self.start_intention(actor, intention);
+            }
             ProposedAction::Move { destination } => {
                 let Some(destination_location) = self.locations.get(&destination) else {
                     return self.reject(
@@ -642,6 +660,148 @@ impl World {
             ));
         }
         ActionResult::Success(events)
+    }
+
+    fn start_intention(&mut self, actor: AgentId, goal: IntentionGoal) -> ActionResult {
+        let expires_at = Tick(self.tick.0.saturating_add(INTENTION_DURATION_TICKS));
+        let intention = Intention { goal, expires_at };
+        if let Err(rejection) = self.intention_action(actor, &intention) {
+            let location = self.agents.get(&actor).map(|agent| agent.location);
+            return self.reject(actor, location, rejection);
+        }
+        self.agents
+            .get_mut(&actor)
+            .expect("validated intention actor")
+            .intention = Some(intention);
+        self.continue_intention(actor)
+            .unwrap_or_else(|| self.execute(actor, ProposedAction::Wait))
+    }
+
+    pub fn continue_intention(&mut self, actor: AgentId) -> Option<ActionResult> {
+        let intention = self.agents.get(&actor)?.intention.clone()?;
+        let needs = &self.agents.get(&actor)?.needs;
+        let interrupted = (needs.food < 0.1
+            && !matches!(&intention.goal, IntentionGoal::Eat { .. }))
+            || (needs.energy < 0.1 && !matches!(&intention.goal, IntentionGoal::Rest))
+            || needs.safety < 0.1;
+        if intention.expires_at <= self.tick || interrupted {
+            self.agents.get_mut(&actor)?.intention = None;
+            return None;
+        }
+        let action = match self.intention_action(actor, &intention) {
+            Ok(Some(action)) => action,
+            Ok(None) => {
+                self.agents.get_mut(&actor)?.intention = None;
+                return None;
+            }
+            Err(rejection) => {
+                let location = self.agents.get(&actor).map(|agent| agent.location);
+                self.agents.get_mut(&actor)?.intention = None;
+                return Some(self.reject(actor, location, rejection));
+            }
+        };
+        let terminal = !matches!(action, ProposedAction::Move { .. });
+        let result = self.execute(actor, action);
+        let completed = terminal
+            || matches!(result, ActionResult::Rejected(_))
+            || self.intention_complete(actor, &intention.goal);
+        if completed && let Some(agent) = self.agents.get_mut(&actor) {
+            agent.intention = None;
+        }
+        Some(result)
+    }
+
+    fn intention_action(
+        &self,
+        actor: AgentId,
+        intention: &Intention,
+    ) -> Result<Option<ProposedAction>, ActionRejection> {
+        let agent = self
+            .agents
+            .get(&actor)
+            .ok_or(ActionRejection::UnknownActor(actor))?;
+        let travel = |destination| {
+            self.next_route_step(agent.location, destination)
+                .map(|step| step.map(|destination| ProposedAction::Move { destination }))
+        };
+        match &intention.goal {
+            IntentionGoal::Visit { destination } => travel(*destination),
+            IntentionGoal::Eat { destination } => {
+                let location = self
+                    .locations
+                    .get(destination)
+                    .ok_or(ActionRejection::UnknownLocation(*destination))?;
+                if *destination != agent.home && !location.serves_food {
+                    return Err(ActionRejection::CannotEatHere(*destination));
+                }
+                if agent.location == *destination {
+                    Ok(Some(ProposedAction::Eat))
+                } else {
+                    travel(*destination)
+                }
+            }
+            IntentionGoal::Rest => {
+                if agent.location == agent.home {
+                    Ok(Some(ProposedAction::Rest))
+                } else {
+                    travel(agent.home)
+                }
+            }
+            IntentionGoal::Work => {
+                let workplace = agent
+                    .workplace
+                    .ok_or(ActionRejection::CannotWorkHere(agent.location))?;
+                if agent.location == workplace {
+                    Ok(Some(ProposedAction::Work))
+                } else {
+                    travel(workplace)
+                }
+            }
+            IntentionGoal::Talk {
+                target,
+                tone,
+                message,
+            } => Ok(Some(ProposedAction::Talk {
+                target: *target,
+                tone: *tone,
+                message: message.clone(),
+            })),
+        }
+    }
+
+    fn next_route_step(
+        &self,
+        from: LocationId,
+        destination: LocationId,
+    ) -> Result<Option<LocationId>, ActionRejection> {
+        if !self.locations.contains_key(&destination) {
+            return Err(ActionRejection::UnknownLocation(destination));
+        }
+        if from == destination {
+            return Ok(None);
+        }
+        let mut queue = VecDeque::from([(from, None)]);
+        let mut visited = BTreeSet::from([from]);
+        while let Some((location, first_step)) = queue.pop_front() {
+            for next in &self.locations[&location].connected {
+                if !visited.insert(*next) || !self.locations[next].is_open(self.tick.hour()) {
+                    continue;
+                }
+                let first_step = first_step.or(Some(*next));
+                if *next == destination {
+                    return Ok(first_step);
+                }
+                queue.push_back((*next, first_step));
+            }
+        }
+        Err(ActionRejection::NoRoute { from, destination })
+    }
+
+    fn intention_complete(&self, actor: AgentId, goal: &IntentionGoal) -> bool {
+        let Some(agent) = self.agents.get(&actor) else {
+            return true;
+        };
+        matches!(goal, IntentionGoal::Visit { destination } if agent.location == *destination)
     }
 
     fn share_rumor(&mut self, speaker: AgentId, listener: AgentId) {
@@ -1096,6 +1256,31 @@ impl World {
                     "agent {id} has an expired activity"
                 )));
             }
+            if let Some(intention) = &agent.intention {
+                let target_is_valid = match &intention.goal {
+                    IntentionGoal::Visit { destination } | IntentionGoal::Eat { destination } => {
+                        self.locations.contains_key(destination)
+                    }
+                    IntentionGoal::Rest => self.locations.contains_key(&agent.home),
+                    IntentionGoal::Work => agent
+                        .workplace
+                        .is_some_and(|workplace| self.locations.contains_key(&workplace)),
+                    IntentionGoal::Talk {
+                        target, message, ..
+                    } => {
+                        target != id
+                            && self.agents.contains_key(target)
+                            && !message.trim().is_empty()
+                            && !message.chars().any(char::is_control)
+                            && message.chars().count() <= MAX_TALK_MESSAGE_CHARS
+                    }
+                };
+                if intention.expires_at <= self.tick || !target_is_valid {
+                    return Err(WorldError::InvalidState(format!(
+                        "agent {id} has an invalid intention"
+                    )));
+                }
+            }
             if agent.relationships.iter().any(|(target, relationship)| {
                 target == id || !self.agents.contains_key(target) || !relationship.is_normalized()
             }) {
@@ -1149,8 +1334,8 @@ impl World {
 mod tests {
     use super::{
         ActionRejection, ActionResult, Activity, AgentId, ConfrontationOutcome, DialogueTone,
-        EventId, EventKind, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
-        Relationship, Tick, World, WorldError,
+        EventId, EventKind, Intention, IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget,
+        ProposedAction, Relationship, Tick, World, WorldError,
     };
     use crate::sim::ActivityKind;
     use uuid::Uuid;
@@ -1366,6 +1551,83 @@ mod tests {
             closes_at_hour: 8,
         });
         assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+    }
+
+    #[test]
+    fn multi_hop_intentions_continue_and_clear() {
+        let mut world = World::briar_glen(3).expect("town");
+        world.advance_to(Tick(12 * 12)).expect("noon");
+        let actor = *world.agents.keys().next().expect("resident");
+        let destination = world
+            .locations
+            .values()
+            .find(|location| location.name == "Town Hall")
+            .expect("town hall")
+            .id;
+        assert!(
+            !world.locations[&world.agents[&actor].location]
+                .connected
+                .contains(&destination)
+        );
+
+        assert!(matches!(
+            world.execute(
+                actor,
+                ProposedAction::Pursue {
+                    intention: IntentionGoal::Visit { destination },
+                },
+            ),
+            ActionResult::Success(_)
+        ));
+        assert!(world.agents[&actor].intention.is_some());
+
+        while world.agents[&actor].intention.is_some() {
+            let until = world.agents[&actor]
+                .activity
+                .expect("travel activity")
+                .until;
+            world.advance_to(until).expect("finish route step");
+            world.continue_intention(actor);
+        }
+
+        assert_eq!(world.agents[&actor].location, destination);
+        assert_eq!(
+            world
+                .events()
+                .iter()
+                .filter(
+                    |event| matches!(event.kind, EventKind::Moved { agent, .. } if agent == actor)
+                )
+                .count(),
+            2
+        );
+        world.validate().expect("valid completed intention");
+    }
+
+    #[test]
+    fn invalid_and_expired_intentions_clear_safely() {
+        let mut world = World::briar_glen(3).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let unknown = crate::sim::LocationId(Uuid::nil());
+        assert!(matches!(
+            world.execute(
+                actor,
+                ProposedAction::Pursue {
+                    intention: IntentionGoal::Visit {
+                        destination: unknown,
+                    },
+                },
+            ),
+            ActionResult::Rejected(ActionRejection::UnknownLocation(id)) if id == unknown
+        ));
+        assert_eq!(world.agents[&actor].intention, None);
+
+        world.agents.get_mut(&actor).expect("resident").intention = Some(Intention {
+            goal: IntentionGoal::Rest,
+            expires_at: world.tick,
+        });
+        assert_eq!(world.continue_intention(actor), None);
+        assert_eq!(world.agents[&actor].intention, None);
     }
 
     #[test]

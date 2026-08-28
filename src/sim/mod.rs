@@ -7,8 +7,8 @@ mod scheduler;
 mod world;
 
 pub use action::{
-    ActionRejection, ActionResult, DialogueTone, MAX_TALK_MESSAGE_CHARS, ObservationTarget,
-    ProposedAction,
+    ActionRejection, ActionResult, DialogueTone, Intention, IntentionGoal, MAX_TALK_MESSAGE_CHARS,
+    ObservationTarget, ProposedAction,
 };
 pub use agent::{
     Activity, ActivityKind, Agent, Belief, Goal, GoalKind, Needs, Occupation, Personality, Rumor,

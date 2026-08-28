@@ -10,7 +10,7 @@ The observation is subjective and complete: do not invent people, places, posses
 Prioritize urgent needs, then feasible goals whose progress is below 1.0.
 Let personality shape choices: openness and impulsiveness favor exploration, agreeableness favors conversation, ambition favors work, and neuroticism favors safety and rest. Mood ranges from -1 (very negative) through 0 (neutral) to 1 (very positive); let it shape fallback choices without overriding urgent needs or feasible goals.
 Beliefs are subjective estimates from witnessed behavior and credible rumors; weigh sociability, reliability, and hostility by confidence, never as objective facts. Rumors identify who passed along a historical report, its retelling depth, and confidence; treat them as hearsay, not objective truth.
-The observation gives local_time, workplace opening_hours, current activities, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Route hints are immediate legal move_to IDs toward home, work, or food; use them when pursuing those destinations. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
+The observation gives local_time, workplace opening_hours, your current activity and intention, action_affordances, and route_hints. Visible residents may be occupied; only talk to IDs listed in talk_to. Confront only an exact target and claim pair listed in confront, and only when acting on that known rumor. Each route hint has a final destination and immediate legal next_hop. Use pursue for multi-step travel, food, rest, or work so the simulation can continue it without another decision. Move only to a move_to ID, talk only to a talk_to ID, and propose eat, rest, or work only when its can_* value is true. Observe only the current location or a visible agent; wait is always valid.
 For talk, choose a tone grounded in the current mood, personality, relationship, and beliefs: friendly, supportive, neutral, or tense. Write natural dialogue grounded only in the current observation, relevant memories, beliefs, and rumors. Keep it to one printable line of at most 200 characters.
 Return only one JSON object matching exactly one of these forms:
 {"action":"move","destination":"location UUID"}
@@ -21,6 +21,11 @@ Return only one JSON object matching exactly one of these forms:
 {"action":"eat"}
 {"action":"rest"}
 {"action":"work"}
+{"action":"pursue","intention":{"goal":"visit","destination":"location UUID"}}
+{"action":"pursue","intention":{"goal":"eat","destination":"route hint destination UUID"}}
+{"action":"pursue","intention":{"goal":"rest"}}
+{"action":"pursue","intention":{"goal":"work"}}
+{"action":"pursue","intention":{"goal":"talk","target":"agent UUID","tone":"friendly|supportive|neutral|tense","message":"non-empty text"}}
 {"action":"wait"}
 The simulation validates your proposal and remains authoritative."#;
 
@@ -390,7 +395,10 @@ mod tests {
             assert!(request.contains(r#"{\"action\":\"confront\""#));
             assert!(request.contains(r#"\"rumors\":"#));
             assert!(request.contains(r#"\"confront\":"#));
-            assert!(request.contains("Route hints are immediate legal move_to IDs"));
+            assert!(request.contains("Each route hint has a final destination"));
+            assert!(request.contains("Use pursue for multi-step travel"));
+            assert!(request.contains(r#"\"destination\":"#));
+            assert!(request.contains(r#"\"next_hop\":"#));
             assert!(request.contains("Move only to a move_to ID"));
             assert!(request.contains("when its can_* value is true"));
             assert!(request.contains(r#"\"local_time\":{\"day\":1,\"hour\":7,\"minute\":0}"#));
@@ -411,7 +419,7 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer test-secret")
             );
-            let body = r#"{"choices":[{"message":{"content":"{\"action\":\"eat\"}"}}]}"#;
+            let body = r#"{"choices":[{"message":{"content":"{\"action\":\"pursue\",\"intention\":{\"goal\":\"rest\"}}"}}]}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -441,7 +449,12 @@ mod tests {
         .expect("provider");
         let action = engine.decide(&observation).await.expect("action");
 
-        assert_eq!(action, ProposedAction::Eat);
+        assert_eq!(
+            action,
+            ProposedAction::Pursue {
+                intention: crate::sim::IntentionGoal::Rest,
+            }
+        );
         assert!(matches!(
             world.execute(actor, action),
             ActionResult::Success(_)

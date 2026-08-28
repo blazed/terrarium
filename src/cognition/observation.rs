@@ -1,5 +1,5 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Event, EventId, EventKind, Goal, LocationId, Needs,
+    Activity, AgentId, Belief, Event, EventId, EventKind, Goal, Intention, LocationId, Needs,
     ObservationTarget, Occupation, OpeningHours, Personality, Relationship, Tick, World,
     event_evidence,
 };
@@ -49,11 +49,17 @@ pub struct ActionAffordances {
     pub can_work: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteHint {
+    pub destination: LocationId,
+    pub next_hop: LocationId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteHints {
-    pub home: Option<LocationId>,
-    pub workplace: Option<LocationId>,
-    pub food: Option<LocationId>,
+    pub home: Option<RouteHint>,
+    pub workplace: Option<RouteHint>,
+    pub food: Option<RouteHint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +80,7 @@ pub struct SelfDescription {
     pub personality: Personality,
     pub needs: Needs,
     pub activity: Option<Activity>,
+    pub intention: Option<Intention>,
     pub mood: f32,
 }
 
@@ -236,6 +243,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             personality: agent.personality.clone(),
             needs: agent.needs.clone(),
             activity: agent.activity,
+            intention: agent.intention.clone(),
             mood: agent.mood,
         },
         current_location: LocationDescription {
@@ -276,7 +284,7 @@ fn rumor_subject(kind: &EventKind) -> Option<AgentId> {
     event_evidence(kind).map(|(subject, ..)| subject)
 }
 
-fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> Option<LocationId> {
+fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> Option<RouteHint> {
     if targets.contains(&start) {
         return None;
     }
@@ -292,7 +300,10 @@ fn next_hop(world: &World, start: LocationId, targets: BTreeSet<LocationId>) -> 
 
     while let Some((location, first_hop)) = queue.pop_front() {
         if targets.contains(&location) {
-            return Some(first_hop);
+            return Some(RouteHint {
+                destination: location,
+                next_hop: first_hop,
+            });
         }
         for neighbor in &world.locations.get(&location)?.connected {
             if !visited.contains(neighbor)
@@ -431,7 +442,8 @@ mod tests {
     use super::{ObservationError, next_hop, perceive};
     use crate::sim::{
         ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, EventKind, GoalKind,
-        ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick, World,
+        Intention, IntentionGoal, ObservationTarget, OpeningHours, ProposedAction, Relationship,
+        Rumor, Tick, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -548,7 +560,10 @@ mod tests {
             ]
             .into_iter()
             .flatten()
-            .all(|next_hop| observation.action_affordances.move_to.contains(&next_hop))
+            .all(|hint| observation
+                .action_affordances
+                .move_to
+                .contains(&hint.next_hop))
         );
         assert!(
             serde_json::to_value(&observation.visible_agents[0])
@@ -575,6 +590,14 @@ mod tests {
             until: Tick(world.tick.0 + 1),
         });
         world.agents.get_mut(&visible).expect("visible").activity = Some(activity);
+        world.agents.get_mut(&observer).expect("observer").intention = Some(Intention {
+            goal: IntentionGoal::Rest,
+            expires_at: Tick(world.tick.0 + 10),
+        });
+        world.agents.get_mut(&visible).expect("visible").intention = Some(Intention {
+            goal: IntentionGoal::Work,
+            expires_at: Tick(world.tick.0 + 10),
+        });
 
         let observation = perceive(&world, observer).expect("observation");
         assert_eq!(
@@ -590,6 +613,20 @@ mod tests {
             Some(activity)
         );
         assert!(!observation.action_affordances.talk_to.contains(&visible));
+        assert_eq!(
+            observation
+                .self_description
+                .intention
+                .expect("own intention")
+                .goal,
+            IntentionGoal::Rest
+        );
+        assert!(
+            serde_json::to_value(&observation.visible_agents[0])
+                .expect("visible agent")
+                .get("intention")
+                .is_none()
+        );
     }
 
     #[test]
@@ -613,7 +650,13 @@ mod tests {
             opens_at_hour: 0,
             closes_at_hour: 1,
         });
-        assert_eq!(next_hop(&world, mill, target.clone()), Some(houses));
+        assert_eq!(
+            next_hop(&world, mill, target.clone()),
+            Some(super::RouteHint {
+                destination: store,
+                next_hop: houses,
+            })
+        );
 
         for location in world.locations.values_mut() {
             if location.id != mill && location.id != store {
