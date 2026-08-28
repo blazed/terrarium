@@ -1,5 +1,5 @@
 use super::{DecisionEngine, DecisionError};
-use crate::{cognition::AgentObservation, sim::ProposedAction};
+use crate::{cognition::AgentObservation, sim::Decision};
 use reqwest::{Client, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -208,10 +208,7 @@ impl OpenAiDecisionEngine {
 }
 
 impl DecisionEngine for OpenAiDecisionEngine {
-    async fn decide(
-        &mut self,
-        observation: &AgentObservation,
-    ) -> Result<ProposedAction, DecisionError> {
+    async fn decide(&mut self, observation: &AgentObservation) -> Result<Decision, DecisionError> {
         let input = serde_json::to_string(observation)?;
         let provider = self.provider.as_deref().map(|provider| ProviderRouting {
             order: [provider],
@@ -257,7 +254,7 @@ impl DecisionEngine for OpenAiDecisionEngine {
                 response_content(request_builder.json(&request).send().await?, self.api).await?
             }
         };
-        Ok(serde_json::from_str(content.trim())?)
+        Ok(Decision::llm(serde_json::from_str(content.trim())?))
     }
 }
 
@@ -417,6 +414,7 @@ mod tests {
             assert!(request.contains(r#"\"action_affordances\":{\"move_to\":["#));
             assert!(request.contains(r#"\"town_event\":"#));
             assert!(request.contains(r#"\"inventory\":"#));
+            assert!(!request.contains(r#"\"routing\":"#));
             assert!(request.contains(r#"\"can_consume_meal\":"#));
             assert!(request.contains(r#"\"can_use_medicine\":"#));
             assert!(request.contains(r#"\"can_seek_treatment\":"#));
@@ -472,13 +470,13 @@ mod tests {
         let action = engine.decide(&observation).await.expect("action");
 
         assert_eq!(
-            action,
+            action.action,
             ProposedAction::Pursue {
                 intention: crate::sim::IntentionGoal::Rest,
             }
         );
         assert!(matches!(
-            world.execute(actor, action),
+            world.execute(actor, action.action),
             ActionResult::Success(_)
         ));
         server.join().expect("server");
@@ -521,7 +519,7 @@ mod tests {
         .expect("token limit");
 
         assert_eq!(
-            engine.decide(&observation).await.expect("action"),
+            engine.decide(&observation).await.expect("action").action,
             ProposedAction::Purchase
         );
         server.join().expect("server");
@@ -559,7 +557,7 @@ mod tests {
         .expect("engine");
 
         assert_eq!(
-            engine.decide(&observation).await.expect("action"),
+            engine.decide(&observation).await.expect("action").action,
             ProposedAction::Purchase
         );
         server.join().expect("server");

@@ -2,7 +2,7 @@ use super::{DecisionEngine, DecisionError};
 use crate::{
     cognition::{AgentObservation, RouteHint, VisibleAgent},
     sim::{
-        Business, DialogueTone, GoalKind, GoalTarget, HealthCondition, IntentionGoal,
+        Business, Decision, DialogueTone, GoalKind, GoalTarget, HealthCondition, IntentionGoal,
         ObservationTarget, Offering, ProposedAction, TownEventKind,
     },
 };
@@ -18,8 +18,8 @@ impl RandomDecisionEngine {
     }
 }
 
-impl DecisionEngine for RandomDecisionEngine {
-    async fn decide(
+impl RandomDecisionEngine {
+    pub async fn decide(
         &mut self,
         observation: &AgentObservation,
     ) -> Result<ProposedAction, DecisionError> {
@@ -390,6 +390,14 @@ impl DecisionEngine for RandomDecisionEngine {
     }
 }
 
+impl DecisionEngine for RandomDecisionEngine {
+    async fn decide(&mut self, observation: &AgentObservation) -> Result<Decision, DecisionError> {
+        RandomDecisionEngine::decide(self, observation)
+            .await
+            .map(Decision::local)
+    }
+}
+
 fn purchase_action(observation: &AgentObservation, offering: Offering) -> Option<ProposedAction> {
     if observation.action_affordances.can_purchase
         && observation
@@ -526,7 +534,7 @@ fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> Di
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionEngine, RandomDecisionEngine};
+    use super::RandomDecisionEngine;
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         sim::{

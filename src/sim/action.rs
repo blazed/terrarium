@@ -56,6 +56,43 @@ pub struct Intention {
     pub expires_at: Tick,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionSource {
+    Local,
+    Llm,
+    LlmFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub action: ProposedAction,
+    pub source: DecisionSource,
+}
+
+impl Decision {
+    pub fn local(action: ProposedAction) -> Self {
+        Self {
+            action,
+            source: DecisionSource::Local,
+        }
+    }
+
+    pub fn llm(action: ProposedAction) -> Self {
+        Self {
+            action,
+            source: DecisionSource::Llm,
+        }
+    }
+
+    pub fn llm_fallback(action: ProposedAction) -> Self {
+        Self {
+            action,
+            source: DecisionSource::LlmFallback,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProposedAction {

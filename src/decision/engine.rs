@@ -1,4 +1,4 @@
-use crate::{cognition::AgentObservation, sim::ProposedAction};
+use crate::{cognition::AgentObservation, sim::Decision};
 use std::future::Future;
 use thiserror::Error;
 
@@ -20,5 +20,5 @@ pub trait DecisionEngine {
     fn decide<'a>(
         &'a mut self,
         observation: &'a AgentObservation,
-    ) -> impl Future<Output = Result<ProposedAction, DecisionError>> + Send + 'a;
+    ) -> impl Future<Output = Result<Decision, DecisionError>> + Send + 'a;
 }

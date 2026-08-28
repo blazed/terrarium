@@ -30,6 +30,7 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
 
 pub fn render_dashboard(world: &World) -> String {
     let counts = event_counts(world);
+    let (local, attempts, llm, fallbacks) = routing_counts(world);
     let town_event = world.active_town_event.map_or_else(
         || "Town event: none".into(),
         |event| {
@@ -60,6 +61,9 @@ pub fn render_dashboard(world: &World) -> String {
             counts.work,
             counts.goals,
             counts.deaths
+        ),
+        format!(
+            "Local decisions: {local} | LLM attempts: {attempts} | LLM decisions: {llm} | LLM fallbacks: {fallbacks}"
         ),
         String::new(),
         "RESIDENTS".into(),
@@ -281,8 +285,23 @@ fn event_counts(world: &World) -> EventCounts {
     counts
 }
 
+fn routing_counts(world: &World) -> (u64, u64, u64, u64) {
+    world.agents.values().fold((0, 0, 0, 0), |counts, agent| {
+        (
+            counts.0.saturating_add(agent.routing.local_decisions),
+            counts
+                .1
+                .saturating_add(agent.routing.llm_decisions)
+                .saturating_add(agent.routing.llm_fallbacks),
+            counts.2.saturating_add(agent.routing.llm_decisions),
+            counts.3.saturating_add(agent.routing.llm_fallbacks),
+        )
+    })
+}
+
 pub fn render_summary(world: &World) -> String {
     let counts = event_counts(world);
+    let (local, attempts, llm, fallbacks) = routing_counts(world);
     [
         "=== RUN SUMMARY ===".into(),
         format!("Elapsed: {}", world.tick),
@@ -298,6 +317,10 @@ pub fn render_summary(world: &World) -> String {
         format!("Treatments: {}", counts.treatments),
         format!("Deaths: {}", counts.deaths),
         format!("Rejected actions: {}", counts.rejected),
+        format!("Local decisions: {local}"),
+        format!("LLM attempts: {attempts}"),
+        format!("LLM decisions: {llm}"),
+        format!("LLM fallbacks: {fallbacks}"),
     ]
     .join("\n")
 }
@@ -552,6 +575,7 @@ mod tests {
         assert!(dashboard.contains("RESIDENTS"));
         assert!(dashboard.contains("Needs % Mn/F/E/S/C/St"));
         assert!(dashboard.contains("M/S/R"));
+        assert!(dashboard.contains("LLM attempts: 0"));
         assert!(dashboard.contains("Goal"));
         assert!(dashboard.contains("Intention"));
         assert!(dashboard.contains("Strongest tie"));
