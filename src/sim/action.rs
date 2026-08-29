@@ -135,6 +135,10 @@ pub enum ProposedAction {
     UseSupplies,
     UseRepairKit,
     UseMedicine,
+    Give {
+        target: AgentId,
+        item: Item,
+    },
     SeekTreatment,
     Rest,
     Work,
@@ -185,6 +189,8 @@ pub enum ActionRejection {
     InventoryFull(Item),
     #[error("inventory has no {0}")]
     ItemUnavailable(Item),
+    #[error("agent {target} does not currently need {item}")]
+    ItemNotNeeded { target: AgentId, item: Item },
     #[error("economy balance overflow")]
     EconomyOverflow,
     #[error("business at {location} cannot cover the {wage}-coin wage; cash is {available}")]

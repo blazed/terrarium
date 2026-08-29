@@ -191,7 +191,7 @@ mod tests {
     use crate::{
         decision::RandomDecisionEngine,
         runner::run_simulation,
-        sim::{Intention, IntentionGoal, Tick, World},
+        sim::{ActionResult, Intention, IntentionGoal, Item, ProposedAction, Tick, World},
     };
     use rusqlite::Connection;
     use std::{env, fs, path::PathBuf};
@@ -209,7 +209,33 @@ mod tests {
         let mut world = run_simulation(world, 50, &mut engine)
             .await
             .expect("simulation");
-        let actor = *world.agents.keys().next().expect("resident");
+        let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
+        let actor = residents[0];
+        let receiver = residents[1];
+        let location = world.agents[&actor].location;
+        world.relocate(receiver, location);
+        world
+            .agents
+            .get_mut(&actor)
+            .expect("resident")
+            .inventory
+            .meals = 1;
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("resident")
+            .needs
+            .food = 0.1;
+        assert!(matches!(
+            world.execute(
+                actor,
+                ProposedAction::Give {
+                    target: receiver,
+                    item: Item::Meal,
+                },
+            ),
+            ActionResult::Success(_)
+        ));
         let actor = world.agents.get_mut(&actor).expect("resident");
         actor.intention = Some(Intention {
             goal: IntentionGoal::Rest,

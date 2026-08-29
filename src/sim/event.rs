@@ -71,6 +71,11 @@ pub enum EventKind {
         agent: AgentId,
         item: Item,
     },
+    ItemGiven {
+        giver: AgentId,
+        receiver: AgentId,
+        item: Item,
+    },
     Treated {
         agent: AgentId,
         cost: u64,
