@@ -4,6 +4,33 @@
 
 These instructions apply to the entire repository. Add a nested `AGENTS.md` only when a subtree genuinely needs different rules.
 
+## Direction
+
+A Westworld-style town that runs itself: deterministic local AI drives every
+resident, an LLM makes a bounded number of social and cognitive decisions,
+and the town generates its own drama — economy, housing, relationships,
+crime. Spectator mode first; a game may come later.
+
+## Backlog
+
+Work is planned as GitHub milestones and issues:
+https://github.com/blazed/terrarium/milestones. Each issue is sized for one
+focused session; `needs-spec` means the intent is fixed but details are not.
+When a milestone starts, its issues become a `[task:*]` DAG of empty jj
+revisions (`jj-todo-workflow`); the landing commit carries `Closes #N`.
+Read the current milestone before proposing new work.
+
+## Standing decisions
+
+- Every idle resident acts each tick, in stable ID order.
+- The local engine is deterministic per seed; LLM runs are not and need not be.
+- The spectator UI is a static page over an exported checkpoint; no server.
+- Crime is theft and violence with real-world consequences: witnesses,
+  rumors, a sheriff, jail, reputation.
+- Population changes through newcomers only: no births, no aging.
+- No configuration for values that never differ between runs; the town
+  definition is data because there will be several towns.
+
 ## Project priorities
 
 - Prefer simple, direct Rust over abstractions for hypothetical future needs.
