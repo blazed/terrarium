@@ -88,13 +88,13 @@ fn durable_intention(
                 .map_or(observation.current_location.id, |route| route.destination),
         }),
         ProposedAction::SeekTreatment => Some(IntentionGoal::SeekTreatment),
+        ProposedAction::Give { target, item } => Some(IntentionGoal::Give { target, item }),
         ProposedAction::Rest => Some(IntentionGoal::Rest),
         ProposedAction::Work => Some(IntentionGoal::Work),
         ProposedAction::ConsumeMeal
         | ProposedAction::UseSupplies
         | ProposedAction::UseRepairKit
         | ProposedAction::UseMedicine
-        | ProposedAction::Give { .. }
         | ProposedAction::Wait => None,
     }
 }

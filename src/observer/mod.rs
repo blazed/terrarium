@@ -482,6 +482,9 @@ fn intention_name(world: &World, goal: &IntentionGoal) -> String {
         IntentionGoal::Rest => "rest".into(),
         IntentionGoal::Work => "work".into(),
         IntentionGoal::SeekTreatment => "seek treatment".into(),
+        IntentionGoal::Give { target, item } => {
+            format!("give {item} to {}", agent_name(world, *target))
+        }
         IntentionGoal::Talk { target, .. } => format!("talk to {}", agent_name(world, *target)),
         IntentionGoal::Observe { target } => format!("observe {}", target_name(world, target)),
         IntentionGoal::Confront { target, .. } => {

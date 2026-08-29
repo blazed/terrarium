@@ -1,7 +1,7 @@
 use crate::sim::{
     Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, HealthCondition,
-    Intention, Inventory, LifeState, LocationId, Needs, ObservationTarget, Occupation, Offering,
-    OpeningHours, Personality, Relationship, RoutingStats, Tick, TownEventKind, World,
+    Intention, Inventory, Item, LifeState, LocationId, Needs, ObservationTarget, Occupation,
+    Offering, OpeningHours, Personality, Relationship, RoutingStats, Tick, TownEventKind, World,
     event_evidence,
 };
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,12 @@ pub struct ConfrontationAffordance {
     pub claim: EventId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AidAffordance {
+    pub target: AgentId,
+    pub item: Item,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionAffordances {
     pub move_to: Vec<LocationId>,
@@ -57,6 +63,7 @@ pub struct ActionAffordances {
     pub can_use_supplies: bool,
     pub can_use_repair_kit: bool,
     pub can_use_medicine: bool,
+    pub give: Vec<AidAffordance>,
     pub can_seek_treatment: bool,
     pub can_rest: bool,
     pub can_work: bool,
@@ -258,6 +265,23 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         can_use_repair_kit: agent.inventory.repair_kits > 0,
         can_use_medicine: agent.inventory.medicine > 0
             && (agent.injury || agent.disease.is_symptomatic()),
+        give: visible_agents
+            .iter()
+            .flat_map(|visible| {
+                let receiver = &world.agents[&visible.id];
+                [Item::Meal, Item::Supplies, Item::RepairKit, Item::Medicine]
+                    .into_iter()
+                    .filter(move |item| {
+                        agent.inventory.count(*item) > 0
+                            && receiver.inventory.has_capacity(*item)
+                            && receiver.needs_item(*item)
+                    })
+                    .map(move |item| AidAffordance {
+                        target: visible.id,
+                        item,
+                    })
+            })
+            .collect(),
         can_seek_treatment: location.business.is_some_and(|business| {
             business.offering == Offering::Medicine
                 && world.is_location_open(location.id)
@@ -616,11 +640,11 @@ fn produced_stock(amount: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObservationError, next_hop, perceive};
+    use super::{AidAffordance, ObservationError, next_hop, perceive};
     use crate::sim::{
         ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, DiseaseState,
-        EventKind, HealthCondition, Intention, IntentionGoal, ObservationTarget, OpeningHours,
-        ProposedAction, Relationship, Rumor, Tick, TownEventKind, World,
+        EventKind, HealthCondition, Intention, IntentionGoal, Item, ObservationTarget,
+        OpeningHours, ProposedAction, Relationship, Rumor, Tick, TownEventKind, World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
@@ -856,6 +880,59 @@ mod tests {
                 .get("inventory")
                 .is_none()
         }));
+    }
+
+    #[test]
+    fn aid_affordances_are_legal_without_exposing_private_needs() {
+        let mut world = World::briar_glen(19).expect("town");
+        let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
+        let observer = residents[0];
+        let receiver = residents[1];
+        let location = world.agents[&observer].location;
+        world.relocate(receiver, location);
+        world
+            .agents
+            .get_mut(&observer)
+            .expect("observer")
+            .inventory
+            .meals = 1;
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("receiver")
+            .needs
+            .food = 0.1;
+
+        let observation = perceive(&world, observer).expect("observation");
+        assert!(
+            observation
+                .action_affordances
+                .give
+                .contains(&AidAffordance {
+                    target: receiver,
+                    item: Item::Meal,
+                })
+        );
+        let visible = serde_json::to_value(&observation.visible_agents).expect("visible agents");
+        assert!(!visible.to_string().contains("needs"));
+        assert!(!visible.to_string().contains("inventory"));
+
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("receiver")
+            .needs
+            .food = 1.0;
+        assert!(
+            !perceive(&world, observer)
+                .expect("observation")
+                .action_affordances
+                .give
+                .contains(&AidAffordance {
+                    target: receiver,
+                    item: Item::Meal,
+                })
+        );
     }
 
     #[test]
