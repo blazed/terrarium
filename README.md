@@ -45,8 +45,9 @@ Residents have bounded health and can become hungry, exhausted, injured, or symp
 
 ```nu
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo deny check
 ```
 
 ## Architecture
