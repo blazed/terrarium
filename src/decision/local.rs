@@ -44,17 +44,17 @@ fn preferred_companion(
         })
 }
 
-pub struct RandomDecisionEngine {
+pub struct LocalDecisionEngine {
     seed: u64,
 }
 
-impl RandomDecisionEngine {
+impl LocalDecisionEngine {
     pub fn new(seed: u64) -> Self {
         Self { seed }
     }
 }
 
-impl RandomDecisionEngine {
+impl LocalDecisionEngine {
     fn choose(&mut self, observation: &AgentObservation) -> Result<ProposedAction, DecisionError> {
         let mut seed = [0; 32];
         seed[..8].copy_from_slice(&self.seed.to_le_bytes());
@@ -406,7 +406,7 @@ impl RandomDecisionEngine {
     }
 }
 
-impl DecisionEngine for RandomDecisionEngine {
+impl DecisionEngine for LocalDecisionEngine {
     async fn decide(&mut self, observation: &AgentObservation) -> Result<Decision, DecisionError> {
         self.choose(observation).map(Decision::local)
     }
@@ -548,7 +548,7 @@ fn dialogue_tone(observation: &AgentObservation, companion: &VisibleAgent) -> Di
 
 #[cfg(test)]
 mod tests {
-    use super::RandomDecisionEngine;
+    use super::LocalDecisionEngine;
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         decision::DecisionEngine,
@@ -570,7 +570,7 @@ mod tests {
         observation.self_description.inventory.repair_kits = 1;
         observation.action_affordances.can_use_repair_kit = true;
         assert_eq!(
-            RandomDecisionEngine::new(0)
+            LocalDecisionEngine::new(0)
                 .decide(&observation)
                 .await
                 .expect("storm supplies")
@@ -580,7 +580,7 @@ mod tests {
         observation.self_description.inventory.repair_kits = 0;
         observation.action_affordances.can_use_repair_kit = false;
         assert_eq!(
-            RandomDecisionEngine::new(0)
+            LocalDecisionEngine::new(0)
                 .decide(&observation)
                 .await
                 .expect("storm shelter")
@@ -604,7 +604,7 @@ mod tests {
         };
         observation.goals.clear();
         assert!(matches!(
-            RandomDecisionEngine::new(1)
+            LocalDecisionEngine::new(1)
                 .decide(&observation)
                 .await
                 .expect("festival decision")
@@ -615,7 +615,7 @@ mod tests {
             visible.last_conversation = Some(observation.tick);
         }
         assert!(!matches!(
-            RandomDecisionEngine::new(1)
+            LocalDecisionEngine::new(1)
                 .decide(&observation)
                 .await
                 .expect("paced festival decision")
@@ -643,7 +643,7 @@ mod tests {
             energy: 1.0,
         };
         assert!(matches!(
-            RandomDecisionEngine::new(3)
+            LocalDecisionEngine::new(3)
                 .decide(&observation)
                 .await
                 .expect("market decision")
@@ -664,7 +664,7 @@ mod tests {
         observation.self_description.inventory.meals = 1;
         observation.action_affordances.can_consume_meal = true;
         assert_eq!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("meal")
@@ -679,7 +679,7 @@ mod tests {
         observation.self_description.inventory.repair_kits = 1;
         observation.action_affordances.can_use_repair_kit = true;
         assert_eq!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("repair")
@@ -693,7 +693,7 @@ mod tests {
         observation.action_affordances.can_use_repair_kit = false;
         observation.action_affordances.can_use_supplies = true;
         assert_eq!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("supplies")
@@ -713,7 +713,7 @@ mod tests {
         observation.action_affordances.can_use_supplies = false;
         observation.goals.clear();
         assert!(matches!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("reserve")
@@ -728,7 +728,7 @@ mod tests {
             remaining_ticks: 10,
         });
         assert!(!matches!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("shortage")
@@ -767,7 +767,7 @@ mod tests {
         observation.self_description.personality.agreeableness = 1.0;
 
         assert_eq!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("aid")
@@ -780,7 +780,7 @@ mod tests {
 
         observation.self_description.inventory.meals = 1;
         assert!(!matches!(
-            RandomDecisionEngine::new(17)
+            LocalDecisionEngine::new(17)
                 .decide(&observation)
                 .await
                 .expect("keep reserve")
@@ -811,7 +811,7 @@ mod tests {
                 confidence: 1.0,
             },
         );
-        let mut engine = RandomDecisionEngine::new(17);
+        let mut engine = LocalDecisionEngine::new(17);
         assert!(matches!(
             engine.decide(&observation).await.expect("decision").action,
             ProposedAction::Talk { target, .. } if target == preferred
@@ -862,7 +862,7 @@ mod tests {
         }];
 
         assert_eq!(
-            RandomDecisionEngine::new(18)
+            LocalDecisionEngine::new(18)
                 .decide(&observation)
                 .await
                 .expect("decision")
@@ -877,7 +877,7 @@ mod tests {
         world.advance_to(Tick(8 * 12)).expect("business hours");
         let actor = *world.agents.keys().next().expect("resident");
         world.agents.get_mut(&actor).expect("resident").balance = 100;
-        let mut engine = RandomDecisionEngine::new(23);
+        let mut engine = LocalDecisionEngine::new(23);
 
         for (offering, food, safety, status) in [
             (Offering::Meal, 0.1, 1.0, 1.0),
@@ -948,7 +948,7 @@ mod tests {
                 .id
         );
         assert_eq!(
-            RandomDecisionEngine::new(7)
+            LocalDecisionEngine::new(7)
                 .decide(&observation)
                 .await
                 .expect("decision")
@@ -963,7 +963,7 @@ mod tests {
     async fn urgent_needs_and_time_drive_routines() {
         let mut world = World::briar_glen(7).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
-        let mut engine = RandomDecisionEngine::new(7);
+        let mut engine = LocalDecisionEngine::new(7);
 
         let hungry = perceive(&world, actor).expect("observation");
         assert!(matches!(
@@ -1168,7 +1168,7 @@ mod tests {
         observation.self_description.inventory.medicine = 1;
         observation.action_affordances.can_use_medicine = true;
         assert_eq!(
-            RandomDecisionEngine::new(18)
+            LocalDecisionEngine::new(18)
                 .decide(&observation)
                 .await
                 .expect("medicine decision")
@@ -1179,7 +1179,7 @@ mod tests {
         observation.self_description.inventory.medicine = 0;
         observation.action_affordances.can_use_medicine = false;
         assert!(matches!(
-            RandomDecisionEngine::new(18)
+            LocalDecisionEngine::new(18)
                 .decide(&observation)
                 .await
                 .expect("clinic route decision")
@@ -1193,7 +1193,7 @@ mod tests {
         let observation = perceive(&world, actor).expect("clinic observation");
         assert!(observation.action_affordances.can_seek_treatment);
         assert_eq!(
-            RandomDecisionEngine::new(18)
+            LocalDecisionEngine::new(18)
                 .decide(&observation)
                 .await
                 .expect("treatment decision")

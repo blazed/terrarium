@@ -7,8 +7,8 @@ use std::{
 };
 use terrarium::{
     decision::{
-        DEFAULT_LLM_CALLS_PER_DAY, HybridDecisionEngine, OpenAiApi, OpenAiDecisionEngine,
-        RandomDecisionEngine, ReasoningEffort,
+        DEFAULT_LLM_CALLS_PER_DAY, HybridDecisionEngine, LocalDecisionEngine, OpenAiApi,
+        OpenAiDecisionEngine, ReasoningEffort,
     },
     observer::{render_dashboard, render_event, render_run_since, render_summary},
     persistence::{load_world, save_world},
@@ -31,7 +31,7 @@ struct RunArgs {
 
 #[derive(Debug, PartialEq)]
 enum DecisionArgs {
-    Random,
+    Local,
     OpenAi {
         model: String,
         base_url: String,
@@ -229,7 +229,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
         {
             return Err(CliError::MissingLlmModel);
         }
-        None => DecisionArgs::Random,
+        None => DecisionArgs::Local,
     };
     Ok(RunArgs {
         seed,
@@ -434,8 +434,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let world_seed = world.seed;
             let first_event = world.events().len();
             let (world, streamed, dialogue_summary) = match decision {
-                DecisionArgs::Random => {
-                    let mut engine = RandomDecisionEngine::new(world_seed);
+                DecisionArgs::Local => {
+                    let mut engine = LocalDecisionEngine::new(world_seed);
                     if live {
                         (
                             run_live(world, ticks, &mut engine, |_| {}).await?,
@@ -485,7 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .map_err(|_| CliError::MissingApiKey(name))?;
                     }
                     let mut engine = HybridDecisionEngine::new(
-                        RandomDecisionEngine::new(world_seed),
+                        LocalDecisionEngine::new(world_seed),
                         llm,
                         calls_per_day,
                     );
@@ -577,7 +577,7 @@ mod tests {
                 resume: None,
                 live: true,
                 llm_log: None,
-                decision: DecisionArgs::Random,
+                decision: DecisionArgs::Local,
             }))
         );
         assert_eq!(
@@ -641,7 +641,7 @@ mod tests {
                 resume: None,
                 live: false,
                 llm_log: None,
-                decision: DecisionArgs::Random,
+                decision: DecisionArgs::Local,
             }))
         );
         assert_eq!(
@@ -653,7 +653,7 @@ mod tests {
                 resume: Some(PathBuf::from("run.sqlite")),
                 live: false,
                 llm_log: None,
-                decision: DecisionArgs::Random,
+                decision: DecisionArgs::Local,
             }))
         );
         assert_eq!(

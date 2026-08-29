@@ -117,7 +117,7 @@ mod tests {
     use super::HybridDecisionEngine;
     use crate::{
         cognition::perceive,
-        decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
+        decision::{DecisionEngine, DecisionError, LocalDecisionEngine},
         persistence::{load_world, save_world},
         runner::run_simulation,
         sim::{
@@ -315,7 +315,7 @@ mod tests {
             calls: calls.clone(),
             fails: false,
         };
-        let mut engine = HybridDecisionEngine::new(RandomDecisionEngine::new(7), llm, 2);
+        let mut engine = HybridDecisionEngine::new(LocalDecisionEngine::new(7), llm, 2);
         let mut world = World::briar_glen(7).expect("town");
         world.advance_to(Tick(Tick::PER_DAY)).expect("day boundary");
 
@@ -337,7 +337,7 @@ mod tests {
     async fn routing_budget_survives_checkpoint_resume() {
         let run = |calls| {
             HybridDecisionEngine::new(
-                RandomDecisionEngine::new(11),
+                LocalDecisionEngine::new(11),
                 FixedEngine {
                     action: ProposedAction::Rest,
                     calls,
