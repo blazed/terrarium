@@ -512,6 +512,29 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
         EventKind::ItemUsed { agent, item } => {
             format!("{} used a {item}.", agent_name(*agent))
         }
+        EventKind::ItemGiven {
+            giver,
+            receiver,
+            item,
+        } if *giver == observer => {
+            format!("You gave a {item} to {}.", agent_name(*receiver))
+        }
+        EventKind::ItemGiven {
+            giver,
+            receiver,
+            item,
+        } if *receiver == observer => {
+            format!("{} gave you a {item}.", agent_name(*giver))
+        }
+        EventKind::ItemGiven {
+            giver,
+            receiver,
+            item,
+        } => format!(
+            "{} gave a {item} to {}.",
+            agent_name(*giver),
+            agent_name(*receiver)
+        ),
         EventKind::Treated { agent, cost } if *agent == observer => {
             format!("You received treatment for {cost} coins.")
         }

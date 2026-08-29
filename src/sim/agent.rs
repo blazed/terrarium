@@ -318,6 +318,7 @@ pub enum ActivityKind {
     Conversing,
     Observing,
     Shopping,
+    Helping,
     UsingItem,
     Treating,
     Resting,
@@ -338,6 +339,7 @@ impl Activity {
             EventKind::Spoke { .. } | EventKind::Confronted { .. } => (ActivityKind::Conversing, 3),
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
             EventKind::Purchased { .. } => (ActivityKind::Shopping, 3),
+            EventKind::ItemGiven { .. } => (ActivityKind::Helping, 3),
             EventKind::ItemUsed { .. } => (ActivityKind::UsingItem, 1),
             EventKind::Treated { .. } => (ActivityKind::Treating, 6),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
@@ -453,6 +455,15 @@ impl Agent {
 
     pub fn is_exhausted(&self) -> bool {
         self.needs.energy < 0.1
+    }
+
+    pub(crate) fn needs_item(&self, item: Item) -> bool {
+        match item {
+            Item::Meal => self.needs.food < 0.25,
+            Item::Supplies => self.needs.safety < 0.4,
+            Item::RepairKit => self.injury || self.needs.safety < 0.2,
+            Item::Medicine => self.injury || self.disease.is_symptomatic(),
+        }
     }
 
     pub fn health_conditions(&self) -> Vec<HealthCondition> {

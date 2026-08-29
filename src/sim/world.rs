@@ -33,6 +33,7 @@ pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32
             DialogueTone::Tense => (*speaker, 0.02, -0.03, 0.12),
         }),
         EventKind::Worked { agent, .. } => Some((*agent, 0.0, 0.08, 0.0)),
+        EventKind::ItemGiven { giver, .. } => Some((*giver, 0.05, 0.08, -0.02)),
         _ => None,
     }
 }
@@ -679,6 +680,22 @@ impl World {
                     event.id
                 )));
             }
+            let invalid_aid = matches!(
+                &event.kind,
+                EventKind::ItemGiven {
+                    giver,
+                    receiver,
+                    ..
+                } if giver == receiver
+                    || !self.agents.contains_key(giver)
+                    || !self.agents.contains_key(receiver)
+            );
+            if invalid_aid {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} references invalid mutual aid participants",
+                    event.id
+                )));
+            }
             let invalid_transaction = match &event.kind {
                 EventKind::Purchased { offering, cost, .. } => event
                     .location
@@ -1093,6 +1110,50 @@ impl World {
                 EventKind::ItemUsed {
                     agent: actor,
                     item: Item::Medicine,
+                }
+            }
+            ProposedAction::Give { target, item } => {
+                if target == actor {
+                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
+                }
+                let Some(receiver) = self.agents.get(&target) else {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::UnknownAgent(target),
+                    );
+                };
+                if !receiver.is_alive() {
+                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
+                }
+                if receiver.location != current {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::NotCoLocated { actor, target },
+                    );
+                }
+                if agent.inventory.count(item) == 0 {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemUnavailable(item),
+                    );
+                }
+                if !receiver.inventory.has_capacity(item) {
+                    return self.reject(actor, Some(current), ActionRejection::InventoryFull(item));
+                }
+                if !receiver.needs_item(item) {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ItemNotNeeded { target, item },
+                    );
+                }
+                EventKind::ItemGiven {
+                    giver: actor,
+                    receiver: target,
+                    item,
                 }
             }
             ProposedAction::SeekTreatment => {
@@ -1975,6 +2036,20 @@ impl World {
                 business.stock -= 1;
                 business.revenue += *cost;
             }
+            EventKind::ItemGiven { receiver, item, .. } => {
+                self.agents
+                    .get_mut(&actor)
+                    .expect("validated giver")
+                    .inventory
+                    .remove(*item);
+                self.agents
+                    .get_mut(receiver)
+                    .expect("validated receiver")
+                    .inventory
+                    .add(*item);
+                self.apply_dialogue_relationship(actor, *receiver, DialogueTone::Supportive, 0.5);
+                self.apply_dialogue_relationship(*receiver, actor, DialogueTone::Supportive, 1.5);
+            }
             EventKind::ItemUsed { item, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     agent.inventory.remove(*item);
@@ -2152,6 +2227,12 @@ impl World {
                 adjust(*listener, listener_change);
             }
             EventKind::Purchased { agent, .. } => adjust(*agent, 0.06),
+            EventKind::ItemGiven {
+                giver, receiver, ..
+            } => {
+                adjust(*giver, 0.05);
+                adjust(*receiver, 0.08);
+            }
             EventKind::ItemUsed { agent, .. } => adjust(*agent, 0.04),
             EventKind::Treated { agent, .. } => adjust(*agent, 0.1),
             EventKind::Rested { agent } => adjust(*agent, 0.08),
@@ -2203,6 +2284,11 @@ impl World {
                 accuser, target, ..
             } => {
                 witnesses.extend([*accuser, *target]);
+            }
+            EventKind::ItemGiven {
+                giver, receiver, ..
+            } => {
+                witnesses.extend([*giver, *receiver]);
             }
             EventKind::Observed { observer, target } => {
                 witnesses.insert(*observer);
@@ -2905,6 +2991,83 @@ mod tests {
         );
         assert_eq!(world.agents[&actor].balance, before.agents[&actor].balance);
         assert_eq!(world.locations[&business], before.locations[&business]);
+    }
+
+    #[test]
+    fn mutual_aid_transfers_needed_items_and_rejects_atomically() {
+        let mut world = World::briar_glen(8).expect("town");
+        let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
+        let giver = residents[0];
+        let receiver = residents[1];
+        let location = world.agents[&giver].location;
+        world.relocate(receiver, location);
+        world.agents.get_mut(&giver).expect("giver").inventory.meals = 2;
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("receiver")
+            .needs
+            .food = 0.1;
+
+        let event = match world.execute(
+            giver,
+            ProposedAction::Give {
+                target: receiver,
+                item: Item::Meal,
+            },
+        ) {
+            ActionResult::Success(events) => events.into_iter().next().expect("aid event"),
+            result => panic!("unexpected result: {result:?}"),
+        };
+        assert!(matches!(
+            event.kind,
+            EventKind::ItemGiven {
+                giver: actual_giver,
+                receiver: actual_receiver,
+                item: Item::Meal,
+            } if actual_giver == giver && actual_receiver == receiver
+        ));
+        assert_eq!(world.agents[&giver].inventory.meals, 1);
+        assert_eq!(world.agents[&receiver].inventory.meals, 1);
+        assert!(world.agents[&receiver].relationships[&giver].trust > 0.0);
+        assert!(
+            world.agents[&receiver]
+                .memories
+                .iter()
+                .any(|memory| memory.id == event.id)
+        );
+
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("receiver")
+            .needs
+            .food = 1.0;
+        let inventories = (
+            world.agents[&giver].inventory,
+            world.agents[&receiver].inventory,
+        );
+        assert_eq!(
+            world.execute(
+                giver,
+                ProposedAction::Give {
+                    target: receiver,
+                    item: Item::Meal,
+                },
+            ),
+            ActionResult::Rejected(ActionRejection::ItemNotNeeded {
+                target: receiver,
+                item: Item::Meal,
+            })
+        );
+        assert_eq!(
+            (
+                world.agents[&giver].inventory,
+                world.agents[&receiver].inventory,
+            ),
+            inventories
+        );
+        world.validate().expect("valid aid state");
     }
 
     #[test]

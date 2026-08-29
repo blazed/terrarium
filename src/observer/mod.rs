@@ -236,6 +236,7 @@ struct EventCounts {
     conversations: usize,
     confrontations: usize,
     purchases: usize,
+    aid: usize,
     items_used: usize,
     rests: usize,
     work: usize,
@@ -254,6 +255,7 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Spoke { .. } => counts.conversations += 1,
             EventKind::Confronted { .. } => counts.confrontations += 1,
             EventKind::Purchased { .. } => counts.purchases += 1,
+            EventKind::ItemGiven { .. } => counts.aid += 1,
             EventKind::ItemUsed { .. } => counts.items_used += 1,
             EventKind::Rested { .. } => counts.rests += 1,
             EventKind::Worked { .. } => counts.work += 1,
@@ -314,6 +316,7 @@ pub fn render_summary(world: &World) -> String {
         format!("Conversations: {}", counts.conversations),
         format!("Confrontations: {}", counts.confrontations),
         format!("Purchases: {}", counts.purchases),
+        format!("Aid given: {}", counts.aid),
         format!("Items used: {}", counts.items_used),
         format!("Rests: {}", counts.rests),
         format!("Work: {}", counts.work),
@@ -382,6 +385,15 @@ pub fn render_event(world: &World, event: &Event) -> String {
         EventKind::ItemUsed { agent, item } => {
             format!("{time}  {} used a {item}", agent_name(world, *agent))
         }
+        EventKind::ItemGiven {
+            giver,
+            receiver,
+            item,
+        } => format!(
+            "{time}  {} gave a {item} to {}",
+            agent_name(world, *giver),
+            agent_name(world, *receiver)
+        ),
         EventKind::Treated { agent, cost } => format!(
             "{time}  {} received treatment for {cost} coins",
             agent_name(world, *agent)
