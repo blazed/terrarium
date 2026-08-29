@@ -43,6 +43,10 @@ pub enum IntentionGoal {
     Rest,
     Work,
     SeekTreatment,
+    Give {
+        target: AgentId,
+        item: Item,
+    },
     Talk {
         target: AgentId,
         tone: DialogueTone,
@@ -236,7 +240,8 @@ pub enum ActionResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{DialogueTone, ProposedAction};
+    use super::{AgentId, DialogueTone, IntentionGoal, Item, ProposedAction};
+    use uuid::Uuid;
 
     #[test]
     fn medical_actions_parse_from_strict_json_forms() {
@@ -249,6 +254,23 @@ mod tests {
             serde_json::from_str::<ProposedAction>(r#"{"action":"seek_treatment"}"#)
                 .expect("treatment action"),
             ProposedAction::SeekTreatment
+        );
+    }
+
+    #[test]
+    fn mutual_aid_parses_from_the_strict_json_form() {
+        let target = AgentId(Uuid::nil());
+        assert_eq!(
+            serde_json::from_str::<ProposedAction>(
+                r#"{"action":"pursue","intention":{"goal":"give","target":"00000000-0000-0000-0000-000000000000","item":"medicine"}}"#,
+            )
+            .expect("aid action"),
+            ProposedAction::Pursue {
+                intention: IntentionGoal::Give {
+                    target,
+                    item: Item::Medicine,
+                },
+            }
         );
     }
 

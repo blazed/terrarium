@@ -522,6 +522,7 @@ impl World {
                     intention.goal,
                     IntentionGoal::Talk { target, .. }
                         | IntentionGoal::Confront { target, .. }
+                        | IntentionGoal::Give { target, .. }
                         if deceased.contains(&target)
                 )
             }) {
@@ -1480,6 +1481,10 @@ impl World {
                     travel(clinic)
                 }
             }
+            IntentionGoal::Give { target, item } => Ok(Some(ProposedAction::Give {
+                target: *target,
+                item: *item,
+            })),
             IntentionGoal::Work => {
                 let workplace = agent
                     .workplace
@@ -2491,6 +2496,9 @@ impl World {
                     }
                     IntentionGoal::Rest => self.locations.contains_key(&agent.home),
                     IntentionGoal::SeekTreatment => self.clinic_location().is_some(),
+                    IntentionGoal::Give { target, .. } => {
+                        target != id && self.agents.get(target).is_some_and(Agent::is_alive)
+                    }
                     IntentionGoal::Work => agent
                         .workplace
                         .is_some_and(|workplace| self.locations.contains_key(&workplace)),

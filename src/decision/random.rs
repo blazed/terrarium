@@ -165,6 +165,37 @@ impl RandomDecisionEngine {
             return Ok(action);
         }
 
+        if let Some(aid) = observation
+            .action_affordances
+            .give
+            .iter()
+            .filter(|aid| observation.self_description.inventory.count(aid.item) > 1)
+            .filter(|aid| {
+                observation
+                    .visible_agents
+                    .iter()
+                    .find(|visible| visible.id == aid.target)
+                    .is_some_and(|visible| {
+                        personality.agreeableness + visible.relationship.score() >= 0.6
+                    })
+            })
+            .max_by(|left, right| {
+                let score = |target| {
+                    observation
+                        .visible_agents
+                        .iter()
+                        .find(|visible| visible.id == target)
+                        .map_or(f32::MIN, |visible| visible.relationship.score())
+                };
+                score(left.target).total_cmp(&score(right.target))
+            })
+        {
+            return Ok(ProposedAction::Give {
+                target: aid.target,
+                item: aid.item,
+            });
+        }
+
         if let Some(event) = &observation.town_event {
             match event.kind {
                 TownEventKind::Festival => {
@@ -522,8 +553,8 @@ mod tests {
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         decision::DecisionEngine,
         sim::{
-            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Offering,
-            ProposedAction, Relationship, Tick, World,
+            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Item,
+            Offering, ProposedAction, Relationship, Tick, World,
         },
     };
     use uuid::Uuid;
@@ -706,6 +737,55 @@ mod tests {
                 | ProposedAction::Pursue {
                     intention: IntentionGoal::Purchase { .. }
                 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn agreeable_residents_offer_useful_surplus_inventory() {
+        let mut world = World::briar_glen(17).expect("town");
+        let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
+        let actor = residents[0];
+        let receiver = residents[1];
+        let location = world.agents[&actor].location;
+        world.relocate(receiver, location);
+        world.agents.get_mut(&actor).expect("actor").inventory.meals = 2;
+        world
+            .agents
+            .get_mut(&receiver)
+            .expect("receiver")
+            .needs
+            .food = 0.1;
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.needs = crate::sim::Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.self_description.personality.agreeableness = 1.0;
+
+        assert_eq!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("aid")
+                .action,
+            ProposedAction::Give {
+                target: receiver,
+                item: Item::Meal,
+            }
+        );
+
+        observation.self_description.inventory.meals = 1;
+        assert!(!matches!(
+            RandomDecisionEngine::new(17)
+                .decide(&observation)
+                .await
+                .expect("keep reserve")
+                .action,
+            ProposedAction::Give { .. }
         ));
     }
 
