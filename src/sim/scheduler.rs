@@ -1,26 +1,16 @@
 use super::{AgentId, World};
 
-/// Gives one idle resident a turn per tick, rotating in stable ID order.
+/// Gives every living idle resident a turn each tick, in stable ID order.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Scheduler;
 
 impl Scheduler {
     pub fn agents_to_act(self, world: &World) -> Vec<AgentId> {
-        let alive = world
+        world
             .agents
             .values()
-            .filter(|agent| agent.is_alive())
-            .collect::<Vec<_>>();
-        if alive.is_empty() {
-            return Vec::new();
-        }
-        let alive_count = alive.len();
-        alive
-            .into_iter()
-            .nth(world.tick.0 as usize % alive_count)
-            .filter(|agent| agent.activity.is_none())
+            .filter(|agent| agent.is_alive() && agent.activity.is_none())
             .map(|agent| agent.id)
-            .into_iter()
             .collect()
     }
 }
@@ -34,12 +24,16 @@ mod tests {
     fn busy_residents_do_not_receive_turns() {
         let mut world = World::briar_glen(22).expect("town");
         let scheduler = Scheduler;
-        let actor = scheduler.agents_to_act(&world)[0];
+        let actors = scheduler.agents_to_act(&world);
+        let actor = actors[0];
+        assert_eq!(actors.len(), world.agents.len());
         world.agents.get_mut(&actor).expect("resident").activity = Some(Activity {
             kind: ActivityKind::Resting,
             until: Tick(world.tick.0 + 12),
         });
-        assert!(scheduler.agents_to_act(&world).is_empty());
+        let actors = scheduler.agents_to_act(&world);
+        assert_eq!(actors.len(), world.agents.len() - 1);
+        assert!(!actors.contains(&actor));
     }
 
     #[test]
@@ -59,6 +53,6 @@ mod tests {
         }
 
         assert_eq!(left_schedule, right_schedule);
-        assert_eq!(left_schedule.len(), 10_000);
+        assert!(left_schedule.len() > 10_000);
     }
 }
