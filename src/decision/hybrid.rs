@@ -14,17 +14,12 @@ pub struct HybridDecisionEngine<L, E> {
 }
 
 impl<L, E> HybridDecisionEngine<L, E> {
-    pub fn new(local: L, llm: E, calls_per_day: u8) -> Result<Self, DecisionError> {
-        if calls_per_day == 0 {
-            return Err(DecisionError::Configuration(
-                "LLM calls per day must be greater than zero".into(),
-            ));
-        }
-        Ok(Self {
+    pub fn new(local: L, llm: E, calls_per_day: u8) -> Self {
+        Self {
             local,
             llm,
             calls_per_day,
-        })
+        }
     }
 
     fn can_call_llm(&self, observation: &AgentObservation, action: &ProposedAction) -> bool {
@@ -182,7 +177,6 @@ mod tests {
             },
             2,
         )
-        .expect("hybrid engine")
     }
 
     #[tokio::test]
@@ -268,8 +262,7 @@ mod tests {
                 fails: false,
             },
             u8::MAX,
-        )
-        .expect("hybrid engine");
+        );
         let mut world = World::briar_glen(7).expect("town");
         let homes = world
             .agents
@@ -321,8 +314,7 @@ mod tests {
             calls: calls.clone(),
             fails: false,
         };
-        let mut engine =
-            HybridDecisionEngine::new(RandomDecisionEngine::new(7), llm, 2).expect("hybrid engine");
+        let mut engine = HybridDecisionEngine::new(RandomDecisionEngine::new(7), llm, 2);
         let mut world = World::briar_glen(7).expect("town");
         world.advance_to(Tick(Tick::PER_DAY)).expect("day boundary");
 
@@ -352,7 +344,6 @@ mod tests {
                 },
                 2,
             )
-            .expect("hybrid engine")
         };
         let mut continuous_engine = run(Arc::new(AtomicUsize::new(0)));
         let continuous = run_simulation(

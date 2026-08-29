@@ -392,18 +392,13 @@ impl World {
     fn disease_exposure_succeeds(&self, source: AgentId, target: AgentId) -> bool {
         let source = source.0.as_u128();
         let target = target.0.as_u128();
-        let mut value = self.seed
+        let mixed = self.seed
             ^ self.tick.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ source as u64
             ^ (source >> 64) as u64
             ^ target as u64
             ^ (target >> 64) as u64;
-        value ^= value >> 30;
-        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        value ^= value >> 27;
-        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
-        value ^= value >> 31;
-        value % 100 < 35
+        StdRng::seed_from_u64(mixed).random_bool(0.35)
     }
 
     pub fn advance_to(&mut self, proposed: Tick) -> Result<(), WorldError> {

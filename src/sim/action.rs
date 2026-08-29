@@ -89,9 +89,9 @@ impl Decision {
 
     pub fn llm(action: ProposedAction) -> Self {
         Self {
-            llm_proposal: Some(action.clone()),
             action,
             source: DecisionSource::Llm,
+            llm_proposal: None,
         }
     }
 

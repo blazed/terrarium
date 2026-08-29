@@ -1,4 +1,6 @@
-use super::{AgentId, DecisionSource, Event, EventKind, Intention, LocationId, Relationship, Tick};
+use super::{
+    AgentId, DecisionSource, Event, EventKind, Intention, LocationId, Offering, Relationship, Tick,
+};
 
 pub const MAX_ITEMS_PER_KIND: u8 = 3;
 
@@ -98,6 +100,20 @@ impl Inventory {
 
     pub fn has_capacity(self, item: Item) -> bool {
         self.count(item) < MAX_ITEMS_PER_KIND
+    }
+
+    pub(crate) fn reserve_offering(self, shortage: bool) -> Option<Offering> {
+        if shortage {
+            None
+        } else if self.meals < 2 {
+            Some(Offering::Meal)
+        } else if self.supplies == 0 {
+            Some(Offering::Supplies)
+        } else if self.repair_kits == 0 {
+            Some(Offering::Repairs)
+        } else {
+            None
+        }
     }
 
     pub fn is_valid(self) -> bool {

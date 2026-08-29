@@ -35,7 +35,6 @@ pub struct LlmDecisionAudit {
     pub reason: Option<&'static str>,
 }
 
-#[derive(Clone)]
 struct IntentionSnapshot {
     id: AgentId,
     resident: String,
@@ -50,15 +49,6 @@ pub async fn run_simulation(
     engine: &mut impl DecisionEngine,
 ) -> Result<World, SimulationError> {
     run_simulation_with_audit(world, ticks, engine, |_, _| {}, |_| {}).await
-}
-
-pub async fn run_simulation_with_events(
-    world: World,
-    ticks: u64,
-    engine: &mut impl DecisionEngine,
-    on_event: impl FnMut(&World, &Event),
-) -> Result<World, SimulationError> {
-    run_simulation_with_audit(world, ticks, engine, on_event, |_| {}).await
 }
 
 pub async fn run_simulation_with_audit(
@@ -314,7 +304,7 @@ fn action_result(result: &ActionResult) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_simulation, run_simulation_with_audit, run_simulation_with_events};
+    use super::{run_simulation, run_simulation_with_audit};
     use crate::{
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
@@ -360,9 +350,13 @@ mod tests {
         let mut right_engine = RandomDecisionEngine::new(1_234);
 
         let mut emitted = 0;
-        let left = run_simulation_with_events(left_world, 2_000, &mut left_engine, |_, _| {
-            emitted += 1;
-        })
+        let left = run_simulation_with_audit(
+            left_world,
+            2_000,
+            &mut left_engine,
+            |_, _| emitted += 1,
+            |_| {},
+        )
         .await
         .expect("simulation");
         let right = run_simulation(right_world, 2_000, &mut right_engine)

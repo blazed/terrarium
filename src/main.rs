@@ -295,8 +295,7 @@ impl DialogueAudit {
 }
 
 struct AuditLog {
-    path: Option<PathBuf>,
-    output: Option<BufWriter<File>>,
+    output: Option<(PathBuf, BufWriter<File>)>,
     error: Option<AuditLogError>,
     dialogue: DialogueAudit,
 }
@@ -304,18 +303,13 @@ struct AuditLog {
 impl AuditLog {
     fn open(path: Option<PathBuf>) -> Result<Self, AuditLogError> {
         let output = path
-            .as_ref()
             .map(|path| {
-                File::create(path)
-                    .map(BufWriter::new)
-                    .map_err(|source| AuditLogError::Open {
-                        path: path.clone(),
-                        source,
-                    })
+                File::create(&path)
+                    .map(|file| (path.clone(), BufWriter::new(file)))
+                    .map_err(|source| AuditLogError::Open { path, source })
             })
             .transpose()?;
         Ok(Self {
-            path,
             output,
             error: None,
             dialogue: DialogueAudit::default(),
@@ -334,7 +328,7 @@ impl AuditLog {
                 return;
             }
         };
-        if let (Some(path), Some(output)) = (&self.path, &mut self.output)
+        if let Some((path, output)) = &mut self.output
             && let Err(source) = output
                 .write_all(&line)
                 .and_then(|()| output.write_all(b"\n"))
@@ -346,11 +340,11 @@ impl AuditLog {
         }
     }
 
-    fn finish(mut self) -> Result<DialogueAudit, AuditLogError> {
+    fn finish(self) -> Result<DialogueAudit, AuditLogError> {
         if let Some(error) = self.error {
             return Err(error);
         }
-        if let (Some(path), Some(output)) = (self.path, &mut self.output) {
+        if let Some((path, mut output)) = self.output {
             output
                 .flush()
                 .map_err(|source| AuditLogError::Flush { path, source })?;
@@ -494,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         RandomDecisionEngine::new(world_seed),
                         llm,
                         calls_per_day,
-                    )?;
+                    );
                     let mut audit = AuditLog::open(llm_log)?;
                     let result = if live {
                         (

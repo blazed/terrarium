@@ -185,13 +185,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
     let visible_agents = location
         .agents
         .iter()
-        .filter(|id| {
-            **id != observer
-                && world
-                    .agents
-                    .get(id)
-                    .is_none_or(|visible| visible.is_alive())
-        })
+        .filter(|id| **id != observer)
         .map(|id| {
             let visible = world
                 .agents
@@ -278,22 +272,11 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             && world.is_location_open(location.id)
             && location.business.is_some_and(Business::solvent),
     };
-    let desired_offering = Offering::desired(&agent.needs).or_else(|| {
-        if world
-            .active_town_event
-            .is_some_and(|event| event.kind == TownEventKind::Shortage)
-        {
-            None
-        } else if agent.inventory.meals < 2 {
-            Some(Offering::Meal)
-        } else if agent.inventory.supplies == 0 {
-            Some(Offering::Supplies)
-        } else if agent.inventory.repair_kits == 0 {
-            Some(Offering::Repairs)
-        } else {
-            None
-        }
-    });
+    let shortage = world
+        .active_town_event
+        .is_some_and(|event| event.kind == TownEventKind::Shortage);
+    let desired_offering =
+        Offering::desired(&agent.needs).or_else(|| agent.inventory.reserve_offering(shortage));
     let route_hints = RouteHints {
         home: next_hop(world, location.id, BTreeSet::from([agent.home])),
         workplace: agent.workplace.and_then(|workplace| {
@@ -323,26 +306,15 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                 .map(|candidate| candidate.id)
                 .collect(),
         ),
-        treatment: if (agent.injury || agent.disease.is_symptomatic())
-            && agent.balance
-                >= world
-                    .clinic_location()
-                    .and_then(|clinic| world.locations.get(&clinic))
-                    .and_then(|location| location.business)
-                    .map_or(u64::MAX, |business| business.price)
-        {
-            world
-                .clinic_location()
-                .filter(|clinic| {
-                    world.is_location_open(*clinic)
-                        && world.locations[clinic]
-                            .business
-                            .is_some_and(|business| business.stock > 0)
-                })
-                .and_then(|clinic| next_hop(world, location.id, BTreeSet::from([clinic])))
-        } else {
-            None
-        },
+        treatment: world.clinic_location().and_then(|clinic| {
+            let business = world.locations[&clinic].business?;
+            ((agent.injury || agent.disease.is_symptomatic())
+                && world.is_location_open(clinic)
+                && business.stock > 0
+                && agent.balance >= business.price)
+                .then(|| next_hop(world, location.id, BTreeSet::from([clinic])))
+                .flatten()
+        }),
     };
 
     Ok(AgentObservation {

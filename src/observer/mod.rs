@@ -1,6 +1,6 @@
 use crate::sim::{
     Agent, AgentId, Event, EventKind, IntentionGoal, LifeState, LocationId, ObservationTarget,
-    World,
+    RoutingStats, World,
 };
 
 pub fn render_run(world: &World) -> String {
@@ -165,33 +165,18 @@ pub fn render_dashboard(world: &World) -> String {
             .max(headers[column].chars().count())
     });
     let render_row = |row: &[String; 12]| {
-        format!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}  {:>w4$}  {:>w5$}  {:<w6$}  {:<w7$}  {:<w8$}  {:<w9$}  {:<w10$}  {:>w11$}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            row[11],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-            w3 = widths[3],
-            w4 = widths[4],
-            w5 = widths[5],
-            w6 = widths[6],
-            w7 = widths[7],
-            w8 = widths[8],
-            w9 = widths[9],
-            w10 = widths[10],
-            w11 = widths[11],
-        )
+        row.iter()
+            .enumerate()
+            .map(|(column, cell)| {
+                let width = widths[column];
+                if matches!(column, 3 | 4 | 5 | 11) {
+                    format!("{cell:>width$}")
+                } else {
+                    format!("{cell:<width$}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
     };
     lines.push(render_row(&headers));
     lines.extend(rows.iter().map(render_row));
@@ -228,7 +213,7 @@ pub fn render_dashboard(world: &World) -> String {
             lines.push(format!(
                 "{:<20} {:<14} {:>6} {:>7} {:>8} {:>7} {:>6}",
                 clipped(&location.name, 20),
-                business.offering.to_string(),
+                business.offering,
                 business.cash,
                 business.stock,
                 business.revenue,
@@ -289,35 +274,32 @@ fn event_counts(world: &World) -> EventCounts {
     counts
 }
 
+fn routing_total(world: &World, field: impl Fn(&RoutingStats) -> u64) -> u64 {
+    world
+        .agents
+        .values()
+        .map(|agent| field(&agent.routing))
+        .sum()
+}
+
 fn intention_counts(world: &World) -> (u64, u64, u64, u64) {
-    world.agents.values().fold((0, 0, 0, 0), |counts, agent| {
-        (
-            counts
-                .0
-                .saturating_add(agent.routing.llm_intentions_started),
-            counts.1.saturating_add(agent.routing.llm_intention_steps),
-            counts
-                .2
-                .saturating_add(agent.routing.llm_intentions_completed),
-            counts
-                .3
-                .saturating_add(agent.routing.llm_intentions_interrupted),
-        )
-    })
+    (
+        routing_total(world, |r| r.llm_intentions_started),
+        routing_total(world, |r| r.llm_intention_steps),
+        routing_total(world, |r| r.llm_intentions_completed),
+        routing_total(world, |r| r.llm_intentions_interrupted),
+    )
 }
 
 fn routing_counts(world: &World) -> (u64, u64, u64, u64) {
-    world.agents.values().fold((0, 0, 0, 0), |counts, agent| {
-        (
-            counts.0.saturating_add(agent.routing.local_decisions),
-            counts
-                .1
-                .saturating_add(agent.routing.llm_decisions)
-                .saturating_add(agent.routing.llm_fallbacks),
-            counts.2.saturating_add(agent.routing.llm_decisions),
-            counts.3.saturating_add(agent.routing.llm_fallbacks),
-        )
-    })
+    let llm = routing_total(world, |r| r.llm_decisions);
+    let fallbacks = routing_total(world, |r| r.llm_fallbacks);
+    (
+        routing_total(world, |r| r.local_decisions),
+        llm + fallbacks,
+        llm,
+        fallbacks,
+    )
 }
 
 pub fn render_summary(world: &World) -> String {

@@ -55,10 +55,7 @@ impl RandomDecisionEngine {
 }
 
 impl RandomDecisionEngine {
-    pub async fn decide(
-        &mut self,
-        observation: &AgentObservation,
-    ) -> Result<ProposedAction, DecisionError> {
+    fn choose(&mut self, observation: &AgentObservation) -> Result<ProposedAction, DecisionError> {
         let mut seed = [0; 32];
         seed[..8].copy_from_slice(&self.seed.to_le_bytes());
         seed[8..16].copy_from_slice(&observation.tick.0.to_le_bytes());
@@ -79,6 +76,13 @@ impl RandomDecisionEngine {
                 intention,
             })
         };
+        let rest_at_home = || {
+            if observation.current_location.id == observation.self_description.home.id {
+                ProposedAction::Rest
+            } else {
+                follow_route(observation.route_hints.home, IntentionGoal::Rest)
+            }
+        };
         if observation.action_affordances.can_use_medicine {
             return Ok(ProposedAction::UseMedicine);
         }
@@ -95,19 +99,11 @@ impl RandomDecisionEngine {
                 return Ok(follow_route(Some(route), IntentionGoal::SeekTreatment));
             }
         }
-        if observation.self_description.health < 0.25
-            && observation.action_affordances.can_use_repair_kit
-        {
-            return Ok(ProposedAction::UseRepairKit);
-        }
         if observation.self_description.health < 0.25 {
-            return Ok(
-                if observation.current_location.id == observation.self_description.home.id {
-                    ProposedAction::Rest
-                } else {
-                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
-                },
-            );
+            if observation.action_affordances.can_use_repair_kit {
+                return Ok(ProposedAction::UseRepairKit);
+            }
+            return Ok(rest_at_home());
         }
 
         if observation
@@ -121,13 +117,7 @@ impl RandomDecisionEngine {
             if needs.safety < 0.6 && observation.action_affordances.can_use_supplies {
                 return Ok(ProposedAction::UseSupplies);
             }
-            return Ok(
-                if observation.current_location.id == observation.self_description.home.id {
-                    ProposedAction::Rest
-                } else {
-                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
-                },
-            );
+            return Ok(rest_at_home());
         }
 
         let desired_offering = Offering::desired(needs);
@@ -140,13 +130,7 @@ impl RandomDecisionEngine {
                 .unwrap_or(ProposedAction::Wait));
         }
         if needs.energy < 0.2 + 0.1 * personality.neuroticism {
-            return Ok(
-                if observation.current_location.id == observation.self_description.home.id {
-                    ProposedAction::Rest
-                } else {
-                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
-                },
-            );
+            return Ok(rest_at_home());
         }
         if needs.companionship < 0.2 + 0.1 * personality.agreeableness
             && let Some(companion) = preferred_companion(observation, true)
@@ -227,13 +211,7 @@ impl RandomDecisionEngine {
 
         let hour = observation.tick.hour();
         if !(7..21).contains(&hour) {
-            return Ok(
-                if observation.current_location.id == observation.self_description.home.id {
-                    ProposedAction::Rest
-                } else {
-                    follow_route(observation.route_hints.home, IntentionGoal::Rest)
-                },
-            );
+            return Ok(rest_at_home());
         }
 
         let mut goal_priorities = [
@@ -342,26 +320,17 @@ impl RandomDecisionEngine {
             });
         }
 
-        if !observation
+        let shortage = observation
             .town_event
             .as_ref()
-            .is_some_and(|event| event.kind == TownEventKind::Shortage)
+            .is_some_and(|event| event.kind == TownEventKind::Shortage);
+        if let Some(action) = observation
+            .self_description
+            .inventory
+            .reserve_offering(shortage)
+            .and_then(|offering| purchase_action(observation, offering))
         {
-            let inventory = observation.self_description.inventory;
-            let reserve = if inventory.meals < 2 {
-                Some(Offering::Meal)
-            } else if inventory.supplies == 0 {
-                Some(Offering::Supplies)
-            } else if inventory.repair_kits == 0 {
-                Some(Offering::Repairs)
-            } else {
-                None
-            };
-            if let Some(action) =
-                reserve.and_then(|offering| purchase_action(observation, offering))
-            {
-                return Ok(action);
-            }
+            return Ok(action);
         }
 
         let weights = [
@@ -408,9 +377,7 @@ impl RandomDecisionEngine {
 
 impl DecisionEngine for RandomDecisionEngine {
     async fn decide(&mut self, observation: &AgentObservation) -> Result<Decision, DecisionError> {
-        RandomDecisionEngine::decide(self, observation)
-            .await
-            .map(Decision::local)
+        self.choose(observation).map(Decision::local)
     }
 }
 
@@ -553,6 +520,7 @@ mod tests {
     use super::RandomDecisionEngine;
     use crate::{
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
+        decision::DecisionEngine,
         sim::{
             Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Offering,
             ProposedAction, Relationship, Tick, World,
@@ -574,7 +542,8 @@ mod tests {
             RandomDecisionEngine::new(0)
                 .decide(&observation)
                 .await
-                .expect("storm supplies"),
+                .expect("storm supplies")
+                .action,
             ProposedAction::UseRepairKit
         );
         observation.self_description.inventory.repair_kits = 0;
@@ -583,7 +552,8 @@ mod tests {
             RandomDecisionEngine::new(0)
                 .decide(&observation)
                 .await
-                .expect("storm shelter"),
+                .expect("storm shelter")
+                .action,
             ProposedAction::Rest
         );
 
@@ -606,7 +576,8 @@ mod tests {
             RandomDecisionEngine::new(1)
                 .decide(&observation)
                 .await
-                .expect("festival decision"),
+                .expect("festival decision")
+                .action,
             ProposedAction::Talk { .. }
         ));
         for visible in &mut observation.visible_agents {
@@ -616,7 +587,8 @@ mod tests {
             RandomDecisionEngine::new(1)
                 .decide(&observation)
                 .await
-                .expect("paced festival decision"),
+                .expect("paced festival decision")
+                .action,
             ProposedAction::Talk { .. }
         ));
 
@@ -643,7 +615,8 @@ mod tests {
             RandomDecisionEngine::new(3)
                 .decide(&observation)
                 .await
-                .expect("market decision"),
+                .expect("market decision")
+                .action,
             ProposedAction::Work
                 | ProposedAction::Pursue {
                     intention: IntentionGoal::Work
@@ -663,7 +636,8 @@ mod tests {
             RandomDecisionEngine::new(17)
                 .decide(&observation)
                 .await
-                .expect("meal"),
+                .expect("meal")
+                .action,
             ProposedAction::ConsumeMeal
         );
 
@@ -677,7 +651,8 @@ mod tests {
             RandomDecisionEngine::new(17)
                 .decide(&observation)
                 .await
-                .expect("repair"),
+                .expect("repair")
+                .action,
             ProposedAction::UseRepairKit
         );
 
@@ -690,7 +665,8 @@ mod tests {
             RandomDecisionEngine::new(17)
                 .decide(&observation)
                 .await
-                .expect("supplies"),
+                .expect("supplies")
+                .action,
             ProposedAction::UseSupplies
         );
 
@@ -709,7 +685,8 @@ mod tests {
             RandomDecisionEngine::new(17)
                 .decide(&observation)
                 .await
-                .expect("reserve"),
+                .expect("reserve")
+                .action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Purchase { .. }
             }
@@ -723,7 +700,8 @@ mod tests {
             RandomDecisionEngine::new(17)
                 .decide(&observation)
                 .await
-                .expect("shortage"),
+                .expect("shortage")
+                .action,
             ProposedAction::Purchase
                 | ProposedAction::Pursue {
                     intention: IntentionGoal::Purchase { .. }
@@ -755,7 +733,7 @@ mod tests {
         );
         let mut engine = RandomDecisionEngine::new(17);
         assert!(matches!(
-            engine.decide(&observation).await.expect("decision"),
+            engine.decide(&observation).await.expect("decision").action,
             ProposedAction::Talk { target, .. } if target == preferred
         ));
 
@@ -772,7 +750,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            engine.decide(&observation).await.expect("decision"),
+            engine.decide(&observation).await.expect("decision").action,
             ProposedAction::Talk {
                 tone: DialogueTone::Tense,
                 ..
@@ -807,7 +785,8 @@ mod tests {
             RandomDecisionEngine::new(18)
                 .decide(&observation)
                 .await
-                .expect("decision"),
+                .expect("decision")
+                .action,
             ProposedAction::Confront { target, claim }
         );
     }
@@ -846,7 +825,7 @@ mod tests {
                 offering
             );
             assert_eq!(
-                engine.decide(&observation).await.expect("decision"),
+                engine.decide(&observation).await.expect("decision").action,
                 ProposedAction::Pursue {
                     intention: IntentionGoal::Purchase { destination },
                 }
@@ -892,7 +871,8 @@ mod tests {
             RandomDecisionEngine::new(7)
                 .decide(&observation)
                 .await
-                .expect("decision"),
+                .expect("decision")
+                .action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
@@ -907,7 +887,7 @@ mod tests {
 
         let hungry = perceive(&world, actor).expect("observation");
         assert!(matches!(
-            engine.decide(&hungry).await.expect("decision"),
+            engine.decide(&hungry).await.expect("decision").action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Purchase { .. }
             }
@@ -916,7 +896,7 @@ mod tests {
         tired.self_description.needs.food = 0.5;
         tired.self_description.needs.energy = 0.1;
         assert_eq!(
-            engine.decide(&tired).await.expect("decision"),
+            engine.decide(&tired).await.expect("decision").action,
             ProposedAction::Rest
         );
         let mut broke = hungry.clone();
@@ -927,7 +907,7 @@ mod tests {
         broke.self_description.needs.safety = 0.5;
         broke.self_description.needs.status = 0.5;
         assert_eq!(
-            engine.decide(&broke).await.expect("decision"),
+            engine.decide(&broke).await.expect("decision").action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
@@ -943,7 +923,7 @@ mod tests {
             .expect("ledger")
             .cash = 0;
         assert!(!matches!(
-            engine.decide(&insolvent).await.expect("decision"),
+            engine.decide(&insolvent).await.expect("decision").action,
             ProposedAction::Work
                 | ProposedAction::Pursue {
                     intention: IntentionGoal::Work
@@ -970,7 +950,7 @@ mod tests {
             .expect("workplace")
             .id;
         assert_eq!(
-            engine.decide(&working).await.expect("decision"),
+            engine.decide(&working).await.expect("decision").action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
@@ -986,13 +966,14 @@ mod tests {
             engine
                 .decide(&perceive(&world, actor).expect("work observation"))
                 .await
-                .expect("decision"),
+                .expect("decision")
+                .action,
             ProposedAction::Work
         );
         world.advance_to(Tick(21 * 12)).expect("night");
         let heading_home = perceive(&world, actor).expect("observation");
         assert_eq!(
-            engine.decide(&heading_home).await.expect("decision"),
+            engine.decide(&heading_home).await.expect("decision").action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Rest,
             }
@@ -1011,7 +992,7 @@ mod tests {
         lonely.visible_agents[0].relationship.affection = 1.0;
         let companion_name = lonely.visible_agents[0].name.clone();
         assert!(matches!(
-            engine.decide(&lonely).await.expect("decision"),
+            engine.decide(&lonely).await.expect("decision").action,
             ProposedAction::Talk { target, message, .. }
                 if target == preferred && message.contains(&companion_name)
         ));
@@ -1028,7 +1009,7 @@ mod tests {
             Tick(999),
         )];
         assert_eq!(
-            engine.decide(&purposeful).await.expect("decision"),
+            engine.decide(&purposeful).await.expect("decision").action,
             ProposedAction::Move { destination }
         );
 
@@ -1048,7 +1029,7 @@ mod tests {
         personality.ambition = 0.0;
         personality.impulsiveness = 0.0;
         assert!(matches!(
-            engine.decide(&purposeful).await.expect("decision"),
+            engine.decide(&purposeful).await.expect("decision").action,
             ProposedAction::Talk {
                 target,
                 tone: DialogueTone::Supportive,
@@ -1063,7 +1044,7 @@ mod tests {
         purposeful.self_description.personality.honesty = 0.4;
         purposeful.self_description.mood = -1.0;
         assert!(matches!(
-            engine.decide(&purposeful).await.expect("decision"),
+            engine.decide(&purposeful).await.expect("decision").action,
             ProposedAction::Talk {
                 target,
                 tone: DialogueTone::Tense,
@@ -1088,7 +1069,7 @@ mod tests {
             Tick(999),
         )];
         assert_eq!(
-            engine.decide(&purposeful).await.expect("decision"),
+            engine.decide(&purposeful).await.expect("decision").action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::Work,
             }
@@ -1110,7 +1091,8 @@ mod tests {
             RandomDecisionEngine::new(18)
                 .decide(&observation)
                 .await
-                .expect("medicine decision"),
+                .expect("medicine decision")
+                .action,
             ProposedAction::UseMedicine
         );
 
@@ -1120,7 +1102,8 @@ mod tests {
             RandomDecisionEngine::new(18)
                 .decide(&observation)
                 .await
-                .expect("clinic route decision"),
+                .expect("clinic route decision")
+                .action,
             ProposedAction::Pursue {
                 intention: IntentionGoal::SeekTreatment
             }
@@ -1133,7 +1116,8 @@ mod tests {
             RandomDecisionEngine::new(18)
                 .decide(&observation)
                 .await
-                .expect("treatment decision"),
+                .expect("treatment decision")
+                .action,
             ProposedAction::SeekTreatment
         );
     }
