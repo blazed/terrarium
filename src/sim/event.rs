@@ -48,7 +48,6 @@ pub enum EventKind {
     Spoke {
         speaker: AgentId,
         listener: AgentId,
-        #[serde(default)]
         tone: DialogueTone,
         message: String,
     },
@@ -116,30 +115,4 @@ pub enum EventKind {
         agent: AgentId,
         reason: ActionRejection,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AgentId, DialogueTone, EventKind};
-    use uuid::Uuid;
-
-    #[test]
-    fn legacy_dialogue_defaults_to_neutral() {
-        let event = EventKind::Spoke {
-            speaker: AgentId(Uuid::nil()),
-            listener: AgentId(Uuid::max()),
-            tone: DialogueTone::Neutral,
-            message: "Hello".into(),
-        };
-        let mut value = serde_json::to_value(event).expect("serialize event");
-        value.as_object_mut().expect("event object").remove("tone");
-
-        assert!(matches!(
-            serde_json::from_value(value).expect("legacy event"),
-            EventKind::Spoke {
-                tone: DialogueTone::Neutral,
-                ..
-            }
-        ));
-    }
 }

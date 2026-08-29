@@ -189,7 +189,7 @@ fn load_json_rows<T: DeserializeOwned>(
 mod tests {
     use super::{PersistenceError, load_run, load_world, save_world};
     use crate::{
-        decision::RandomDecisionEngine,
+        decision::LocalDecisionEngine,
         runner::run_simulation,
         sim::{ActionResult, Intention, IntentionGoal, Item, ProposedAction, Tick, World},
     };
@@ -205,7 +205,7 @@ mod tests {
         let path = test_path("round-trip");
         let _ = fs::remove_file(&path);
         let world = World::briar_glen(u64::MAX).expect("town");
-        let mut engine = RandomDecisionEngine::new(u64::MAX);
+        let mut engine = LocalDecisionEngine::new(u64::MAX);
         let mut world = run_simulation(world, 50, &mut engine)
             .await
             .expect("simulation");
@@ -280,7 +280,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let seed = 12_345;
 
-        let mut continuous_engine = RandomDecisionEngine::new(seed);
+        let mut continuous_engine = LocalDecisionEngine::new(seed);
         let continuous = run_simulation(
             World::briar_glen(seed).expect("town"),
             900,
@@ -289,7 +289,7 @@ mod tests {
         .await
         .expect("continuous run");
 
-        let mut first_engine = RandomDecisionEngine::new(seed);
+        let mut first_engine = LocalDecisionEngine::new(seed);
         let first = run_simulation(
             World::briar_glen(seed).expect("town"),
             400,
@@ -299,7 +299,7 @@ mod tests {
         .expect("first run");
         save_world(&path, &first).expect("checkpoint");
         let resumed = load_world(&path).expect("load checkpoint");
-        let mut resumed_engine = RandomDecisionEngine::new(resumed.seed);
+        let mut resumed_engine = LocalDecisionEngine::new(resumed.seed);
         let resumed = run_simulation(resumed, 500, &mut resumed_engine)
             .await
             .expect("resumed run");
@@ -313,7 +313,7 @@ mod tests {
         let path = test_path("invalid");
         let _ = fs::remove_file(&path);
         let seed = 77;
-        let mut engine = RandomDecisionEngine::new(seed);
+        let mut engine = LocalDecisionEngine::new(seed);
         let world = run_simulation(World::briar_glen(seed).expect("town"), 1, &mut engine)
             .await
             .expect("run");

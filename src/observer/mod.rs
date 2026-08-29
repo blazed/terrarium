@@ -528,7 +528,7 @@ fn location_name(world: &World, id: LocationId) -> String {
 mod tests {
     use super::{render_dashboard, render_event, render_run, render_run_since};
     use crate::{
-        decision::RandomDecisionEngine,
+        decision::LocalDecisionEngine,
         runner::run_simulation,
         sim::{Tick, World},
     };
@@ -581,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn rendering_is_deterministic_and_readable() {
         let world = World::briar_glen(42).expect("town");
-        let mut engine = RandomDecisionEngine::new(42);
+        let mut engine = LocalDecisionEngine::new(42);
         let world = run_simulation(world, 20, &mut engine)
             .await
             .expect("simulation");

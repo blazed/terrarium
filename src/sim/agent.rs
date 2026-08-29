@@ -426,21 +426,15 @@ pub struct Agent {
     pub life: LifeState,
     pub balance: u64,
     pub routing: RoutingStats,
-    #[serde(default)]
     pub inventory: Inventory,
-    #[serde(default)]
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub llm_intention: bool,
-    #[serde(default)]
     pub mood: f32,
     pub relationships: BTreeMap<AgentId, Relationship>,
-    #[serde(default)]
     pub beliefs: BTreeMap<AgentId, Belief>,
     pub goals: Vec<Goal>,
-    #[serde(default)]
     pub memories: Vec<Event>,
-    #[serde(default)]
     pub rumors: Vec<Rumor>,
 }
 
@@ -512,30 +506,5 @@ impl Agent {
         for belief in self.beliefs.values_mut() {
             belief.confidence = (belief.confidence - decay).max(0.0);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Agent;
-    use crate::sim::World;
-
-    #[test]
-    fn legacy_agents_default_new_cognition_state() {
-        let world = World::briar_glen(1).expect("town");
-        let mut value = serde_json::to_value(world.agents.values().next().expect("resident"))
-            .expect("agent JSON");
-        let object = value.as_object_mut().expect("agent object");
-        object.remove("inventory");
-        object.remove("activity");
-        object.remove("mood");
-        object.remove("beliefs");
-        object.remove("rumors");
-        let agent: Agent = serde_json::from_value(value).expect("legacy agent");
-        assert_eq!(agent.inventory, super::Inventory::default());
-        assert_eq!(agent.activity, None);
-        assert_eq!(agent.mood, 0.0);
-        assert!(agent.beliefs.is_empty());
-        assert!(agent.rumors.is_empty());
     }
 }

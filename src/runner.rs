@@ -307,7 +307,7 @@ mod tests {
     use super::{run_simulation, run_simulation_with_audit};
     use crate::{
         cognition::AgentObservation,
-        decision::{DecisionEngine, DecisionError, RandomDecisionEngine},
+        decision::{DecisionEngine, DecisionError, LocalDecisionEngine},
         sim::{
             DeathCause, Decision, EventKind, Intention, IntentionGoal, LifeState, LocationId,
             ProposedAction, Tick, World,
@@ -333,7 +333,7 @@ mod tests {
         }
         world.validate().expect("valid empty population");
         let before = world.clone();
-        let mut engine = RandomDecisionEngine::new(1);
+        let mut engine = LocalDecisionEngine::new(1);
         assert_eq!(
             run_simulation(world, 100, &mut engine)
                 .await
@@ -346,8 +346,8 @@ mod tests {
     async fn seeded_runs_are_reproducible_and_exercise_actions() {
         let left_world = World::briar_glen(1_234).expect("town");
         let right_world = left_world.clone();
-        let mut left_engine = RandomDecisionEngine::new(1_234);
-        let mut right_engine = RandomDecisionEngine::new(1_234);
+        let mut left_engine = LocalDecisionEngine::new(1_234);
+        let mut right_engine = LocalDecisionEngine::new(1_234);
 
         let mut emitted = 0;
         let left = run_simulation_with_audit(
@@ -408,7 +408,7 @@ mod tests {
         let mut signatures = Vec::new();
         for seed in [814_921, 2_643, 4_375, 5_276] {
             let world = World::briar_glen(seed).expect("town");
-            let mut engine = RandomDecisionEngine::new(seed);
+            let mut engine = LocalDecisionEngine::new(seed);
             let world = run_simulation(world, 10, &mut engine)
                 .await
                 .expect("simulation");
@@ -658,7 +658,7 @@ mod tests {
     async fn thirty_days_preserve_invariants() {
         let world = World::briar_glen(1_234).expect("town");
         let start = world.tick.0;
-        let mut engine = RandomDecisionEngine::new(1_234);
+        let mut engine = LocalDecisionEngine::new(1_234);
         let result = run_simulation(world, 30 * 288, &mut engine)
             .await
             .expect("simulation");
