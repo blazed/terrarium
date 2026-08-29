@@ -80,6 +80,13 @@ pub async fn run_simulation_with_audit(
             on_event(&world, event);
         }
         for agent in scheduler.agents_to_act(&world) {
+            if !world
+                .agents
+                .get(&agent)
+                .is_some_and(|resident| resident.is_alive() && resident.activity.is_none())
+            {
+                continue;
+            }
             let previous_events = world.events().len();
             let active_intention = llm_intention(&world, agent);
             let planned_action = active_intention.as_ref().and_then(|snapshot| {
@@ -309,8 +316,8 @@ mod tests {
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, LocalDecisionEngine},
         sim::{
-            DeathCause, Decision, EventKind, Intention, IntentionGoal, LifeState, LocationId,
-            ProposedAction, Tick, World,
+            Activity, ActivityKind, AgentId, DeathCause, Decision, DialogueTone, EventKind,
+            Intention, IntentionGoal, LifeState, LocationId, ProposedAction, Tick, World,
         },
     };
     use uuid::Uuid;
@@ -438,12 +445,18 @@ mod tests {
     async fn continued_intentions_skip_new_decisions() {
         let mut world = World::briar_glen(1).expect("town");
         world.advance_to(Tick(12 * 12)).expect("noon");
-        let actor = world
-            .agents
-            .values()
-            .nth((world.tick.0 as usize + 1) % world.agents.len())
-            .expect("scheduled resident")
-            .id;
+        let actor = world.agents.values().next().expect("resident").id;
+        for resident in world.agents.values_mut() {
+            resident.needs.food = 1.0;
+            resident.needs.energy = 1.0;
+            resident.needs.safety = 1.0;
+            if resident.id != actor {
+                resident.activity = Some(Activity {
+                    kind: ActivityKind::Waiting,
+                    until: Tick(world.tick.0 + 2),
+                });
+            }
+        }
         let destination = world
             .locations
             .values()
@@ -470,6 +483,56 @@ mod tests {
             world.events().last().expect("movement").kind,
             EventKind::Moved { agent, .. } if agent == actor
         ));
+    }
+
+    struct SameTickEngine {
+        first: AgentId,
+        second: AgentId,
+        seen: Vec<AgentId>,
+    }
+
+    impl DecisionEngine for SameTickEngine {
+        async fn decide(
+            &mut self,
+            observation: &AgentObservation,
+        ) -> Result<Decision, DecisionError> {
+            let actor = observation.self_description.id;
+            self.seen.push(actor);
+            Ok(Decision::local(if actor == self.first {
+                ProposedAction::Talk {
+                    target: self.second,
+                    tone: DialogueTone::Neutral,
+                    message: "Stay awhile".into(),
+                }
+            } else {
+                ProposedAction::Wait
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn resident_made_busy_earlier_in_the_tick_does_not_act() {
+        let mut world = World::briar_glen(1).expect("town");
+        let mut residents = world.agents.keys().copied();
+        let first = residents.next().expect("first resident");
+        let second = residents.next().expect("second resident");
+        let location = world.agents[&first].location;
+        world.relocate(second, location);
+        let mut engine = SameTickEngine {
+            first,
+            second,
+            seen: Vec::new(),
+        };
+
+        let world = run_simulation(world, 1, &mut engine)
+            .await
+            .expect("simulation");
+
+        assert!(matches!(
+            world.events().iter().find(|event| matches!(event.kind, EventKind::Spoke { .. })).map(|event| &event.kind),
+            Some(EventKind::Spoke { speaker, listener, .. }) if *speaker == first && *listener == second
+        ));
+        assert!(!engine.seen.contains(&second));
     }
 
     #[derive(Clone, Copy)]
@@ -520,6 +583,7 @@ mod tests {
             agent.health = 1.0;
             agent.injury = false;
         }
+        let resident_count = world.agents.len();
         let mut entries = Vec::new();
         run_simulation_with_audit(
             world,
@@ -531,11 +595,13 @@ mod tests {
         .await
         .expect("simulation");
 
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].status, "started");
-        assert_eq!(entries[0].proposal, entries[0].action);
-        assert_eq!(entries[1].status, "completed");
-        assert_eq!(entries[1].reason, Some("objective_reached"));
+        assert_eq!(entries.len(), resident_count * 2);
+        for pair in entries.as_chunks::<2>().0 {
+            assert_eq!(pair[0].status, "started");
+            assert_eq!(pair[0].proposal, pair[0].action);
+            assert_eq!(pair[1].status, "completed");
+            assert_eq!(pair[1].reason, Some("objective_reached"));
+        }
         for entry in entries {
             let line = serde_json::to_string(&entry).expect("JSONL entry");
             serde_json::from_str::<serde_json::Value>(&line).expect("valid JSON");
@@ -621,9 +687,10 @@ mod tests {
         )
         .await
         .expect("simulation");
-        assert_eq!(rejected_entries.len(), 1);
-        assert_eq!(rejected_entries[0].status, "rejected");
-        assert_eq!(rejected_entries[0].reason, Some("action_rejected"));
+        assert_eq!(rejected_entries.len(), rejected.agents.len());
+        assert!(rejected_entries.iter().all(|entry| {
+            entry.status == "rejected" && entry.reason == Some("action_rejected")
+        }));
         assert_eq!(
             rejected
                 .agents
