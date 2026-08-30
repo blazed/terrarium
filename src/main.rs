@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 use terrarium::{
+    chronicle::render_chronicle,
     decision::{
         DEFAULT_LLM_CALLS_PER_DAY, HybridDecisionEngine, LocalDecisionEngine, OpenAiApi,
         OpenAiDecisionEngine, ReasoningEffort,
@@ -51,12 +52,13 @@ enum Command {
     Run(RunArgs),
     Inspect(PathBuf),
     Report { path: PathBuf, json: bool },
+    Chronicle { path: PathBuf, all: bool },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH\n       terrarium report PATH [--json]"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH\n       terrarium report PATH [--json]\n       terrarium chronicle PATH [--all]"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -92,17 +94,29 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
         }
         Some("report") => {
             let path = args.next().ok_or(CliError::Usage)?;
-            let json = match args.next() {
-                None => false,
-                Some(flag) if flag == "--json" && args.next().is_none() => true,
-                Some(_) => return Err(CliError::Usage),
-            };
+            let json = bool_flag(&mut args, "--json")?;
             Ok(Command::Report {
                 path: path.into(),
                 json,
             })
         }
+        Some("chronicle") => {
+            let path = args.next().ok_or(CliError::Usage)?;
+            let all = bool_flag(&mut args, "--all")?;
+            Ok(Command::Chronicle {
+                path: path.into(),
+                all,
+            })
+        }
         _ => Err(CliError::Usage),
+    }
+}
+
+fn bool_flag(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<bool, CliError> {
+    match args.next() {
+        Some(value) if value == flag && args.next().is_none() => Ok(true),
+        Some(_) => Err(CliError::Usage),
+        None => Ok(false),
     }
 }
 
@@ -556,6 +570,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 println!("{}", report.render_table());
             }
         }
+        Command::Chronicle { path, all } => {
+            println!("{}", render_chronicle(&load_world(path)?, all));
+        }
     }
     Ok(())
 }
@@ -580,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_inspect_and_report_commands() {
+    fn parses_run_inspect_report_and_chronicle_commands() {
         assert_eq!(
             parse_args(args(&[
                 "run",
@@ -618,6 +635,20 @@ mod tests {
             Ok(Command::Report {
                 path: PathBuf::from("run.sqlite"),
                 json: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["chronicle", "run.sqlite"])),
+            Ok(Command::Chronicle {
+                path: PathBuf::from("run.sqlite"),
+                all: false,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["chronicle", "run.sqlite", "--all"])),
+            Ok(Command::Chronicle {
+                path: PathBuf::from("run.sqlite"),
+                all: true,
             })
         );
         assert_eq!(

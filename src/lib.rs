@@ -1,3 +1,4 @@
+pub mod chronicle;
 pub mod cognition;
 pub mod decision;
 pub mod observer;
