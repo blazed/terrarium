@@ -12,6 +12,7 @@ use terrarium::{
     },
     observer::{render_dashboard, render_event, render_run_since, render_summary},
     persistence::{load_world, save_world},
+    report::Report,
     runner::{LlmDecisionAudit, run_simulation, run_simulation_with_audit},
     sim::{AgentId, IntentionGoal, Tick, World},
 };
@@ -49,12 +50,13 @@ enum DecisionArgs {
 enum Command {
     Run(RunArgs),
     Inspect(PathBuf),
+    Report { path: PathBuf, json: bool },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH\n       terrarium report PATH [--json]"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -87,6 +89,18 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
                 return Err(CliError::Usage);
             }
             Ok(Command::Inspect(path.into()))
+        }
+        Some("report") => {
+            let path = args.next().ok_or(CliError::Usage)?;
+            let json = match args.next() {
+                None => false,
+                Some(flag) if flag == "--json" && args.next().is_none() => true,
+                Some(_) => return Err(CliError::Usage),
+            };
+            Ok(Command::Report {
+                path: path.into(),
+                json,
+            })
         }
         _ => Err(CliError::Usage),
     }
@@ -534,6 +548,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
         Command::Inspect(path) => println!("{}", render_dashboard(&load_world(path)?)),
+        Command::Report { path, json } => {
+            let report = Report::from_world(&load_world(path)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.render_table());
+            }
+        }
     }
     Ok(())
 }
@@ -558,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_and_inspect_commands() {
+    fn parses_run_inspect_and_report_commands() {
         assert_eq!(
             parse_args(args(&[
                 "run",
@@ -583,6 +605,20 @@ mod tests {
         assert_eq!(
             parse_args(args(&["inspect", "run.sqlite"])),
             Ok(Command::Inspect(PathBuf::from("run.sqlite")))
+        );
+        assert_eq!(
+            parse_args(args(&["report", "run.sqlite"])),
+            Ok(Command::Report {
+                path: PathBuf::from("run.sqlite"),
+                json: false,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["report", "run.sqlite", "--json"])),
+            Ok(Command::Report {
+                path: PathBuf::from("run.sqlite"),
+                json: true,
+            })
         );
         assert_eq!(
             parse_args(args(&[
