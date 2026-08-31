@@ -209,6 +209,13 @@ impl World {
                 target: *target,
                 claim: *claim,
             })),
+            IntentionGoal::StealFrom { target, loot } => Ok(Some(ProposedAction::Steal {
+                target: *target,
+                loot: *loot,
+            })),
+            IntentionGoal::Attack { target } => {
+                Ok(Some(ProposedAction::Attack { target: *target }))
+            }
         }
     }
 

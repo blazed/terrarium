@@ -493,6 +493,10 @@ fn intention_name(world: &World, goal: &IntentionGoal) -> String {
         IntentionGoal::Confront { target, .. } => {
             format!("confront {}", agent_name(world, *target))
         }
+        IntentionGoal::StealFrom { target, loot } => {
+            format!("steal {loot} from {}", agent_name(world, *target))
+        }
+        IntentionGoal::Attack { target } => format!("attack {}", agent_name(world, *target)),
     }
 }
 
