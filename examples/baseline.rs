@@ -5,8 +5,24 @@
 
 use std::{process::ExitCode, time::Instant};
 use terrarium::{
-    decision::LocalDecisionEngine, report::Report, runner::run_simulation, sim::Tick, sim::World,
+    decision::LocalDecisionEngine, report::Report, runner::run_simulation, sim::EventKind,
+    sim::Tick, sim::World,
 };
+
+/// ponytail: ad-hoc counts until #18 formalizes CrimeMetrics in the report;
+/// move these rows into Report::from_world then.
+fn crime_counts(world: &World) -> (u64, u64) {
+    let mut thefts = 0;
+    let mut assaults = 0;
+    for event in world.events() {
+        match event.kind {
+            EventKind::Stole { .. } => thefts += 1,
+            EventKind::Assaulted { .. } => assaults += 1,
+            _ => {}
+        }
+    }
+    (thefts, assaults)
+}
 
 struct Args {
     seeds: u64,
@@ -103,6 +119,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Row::new("Goals completed", false),
         Row::new("Rejected actions", false),
         Row::new("Waited share %", true),
+        Row::new("Crime: thefts", false),
+        Row::new("Crime: assaults", false),
         Row::new("Resident balance", false),
         Row::new("Resident health", false),
         Row::new("Resident mood", false),
@@ -152,15 +170,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .push(sum(&report.behaviour.rejected_actions_by_reason) as f64);
         rows[11].values.push(report.behaviour.waited_share * 100.0);
 
+        let (thefts, assaults) = crime_counts(&world);
+        rows[12].values.push(thefts as f64);
+        rows[13].values.push(assaults as f64);
+
         for resident in &report.residents {
-            rows[12].values.push(resident.balance as f64);
-            rows[13].values.push(resident.health as f64);
-            rows[14].values.push(resident.mood as f64);
+            rows[14].values.push(resident.balance as f64);
+            rows[15].values.push(resident.health as f64);
+            rows[16].values.push(resident.mood as f64);
             if let Some(relationship_mean) = resident.relationship_mean {
-                rows[15].values.push(relationship_mean as f64);
+                rows[17].values.push(relationship_mean as f64);
             }
-            rows[16].values.push(resident.memories as f64);
-            rows[17].values.push(resident.rumors_carried as f64);
+            rows[18].values.push(resident.memories as f64);
+            rows[19].values.push(resident.rumors_carried as f64);
         }
     }
 

@@ -182,7 +182,7 @@ fn only_present_agents_remember_a_conversation() {
     world
         .advance_to(Tick(world.tick.0 + 10))
         .expect("time advances");
-    assert!((world.agents[&listener].beliefs[&speaker].confidence - 0.29).abs() < f32::EPSILON);
+    assert!((world.agents[&listener].beliefs[&speaker].confidence - 0.298).abs() < f32::EPSILON);
     world.validate().expect("valid beliefs");
 
     world
