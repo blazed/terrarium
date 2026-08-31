@@ -118,7 +118,7 @@ fn relationship_significance(event: &Event) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::render_chronicle;
-    use crate::sim::{ProposedAction, Tick, World};
+    use crate::sim::{EventKind, Loot, Occupation, ProposedAction, Tick, World};
 
     #[test]
     fn chronicle_groups_days_summarizes_and_filters_routine_events() {
@@ -136,5 +136,50 @@ mod tests {
         ));
         assert!(!chronicle.contains(" waited"));
         assert!(render_chronicle(&world, true).contains(" waited"));
+    }
+
+    #[test]
+    fn chronicle_shows_thefts_and_arrests() {
+        let mut world = World::briar_glen(415).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let sheriff = world
+            .agents
+            .values()
+            .find(|agent| agent.occupation == Occupation::Sheriff)
+            .expect("sheriff")
+            .id;
+        let thief = residents[0];
+        let victim = residents[1];
+        // A theft attempt is witnessed by everyone present, the sheriff included.
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            },
+        );
+        let attempt = world
+            .events()
+            .iter()
+            .rev()
+            .find(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::TheftFailed { .. } | EventKind::Stole { .. }
+                )
+            })
+            .expect("attempt")
+            .clone();
+        world.execute(
+            sheriff,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        );
+
+        let chronicle = render_chronicle(&world, false);
+        assert!(chronicle.contains("tried to steal") || chronicle.contains("stole"));
+        assert!(chronicle.contains("arrested"));
     }
 }

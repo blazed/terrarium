@@ -50,11 +50,12 @@ pub fn render_dashboard(world: &World) -> String {
         format!("=== {} — {} ===", world.name, world.tick),
         town_event,
         format!(
-            "Events: {} | Moves: {} | Talks: {} | Confrontations: {} | Rejected: {}",
+            "Events: {} | Moves: {} | Talks: {} | Confrontations: {} | Crimes: {} | Rejected: {}",
             world.events().len(),
             counts.moves,
             counts.conversations,
             counts.confrontations,
+            counts.crimes,
             counts.rejected
         ),
         format!(
@@ -251,6 +252,7 @@ struct EventCounts {
     deaths: usize,
     treatments: usize,
     rejected: usize,
+    crimes: usize,
 }
 
 fn event_counts(world: &World) -> EventCounts {
@@ -270,9 +272,11 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Died { .. } => counts.deaths += 1,
             EventKind::Treated { .. } => counts.treatments += 1,
             EventKind::ActionRejected { .. } => counts.rejected += 1,
-            EventKind::Stole { .. } | EventKind::TheftFailed { .. } => counts.conversations += 0,
-            EventKind::Robbed { .. } | EventKind::Assaulted { .. } => {}
-            EventKind::Arrested { .. } | EventKind::Released { .. } => {}
+            EventKind::Robbed { .. } | EventKind::Released { .. } => {}
+            EventKind::Stole { .. }
+            | EventKind::TheftFailed { .. }
+            | EventKind::Assaulted { .. }
+            | EventKind::Arrested { .. } => counts.crimes += 1,
             EventKind::DiseaseInfected { .. }
             | EventKind::DiseaseSymptoms { .. }
             | EventKind::DiseaseRecovered { .. }
