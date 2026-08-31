@@ -320,6 +320,7 @@ pub enum ActivityKind {
     Shopping,
     Helping,
     UsingItem,
+    Stealing,
     Treating,
     Resting,
     Working,
@@ -340,12 +341,14 @@ impl Activity {
             EventKind::Observed { .. } => (ActivityKind::Observing, 1),
             EventKind::Purchased { .. } => (ActivityKind::Shopping, 3),
             EventKind::ItemGiven { .. } => (ActivityKind::Helping, 3),
+            EventKind::Stole { .. } | EventKind::TheftFailed { .. } => (ActivityKind::Stealing, 3),
             EventKind::ItemUsed { .. } => (ActivityKind::UsingItem, 1),
             EventKind::Treated { .. } => (ActivityKind::Treating, 6),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
-            EventKind::TownEventStarted { .. }
+            EventKind::Robbed { .. }
+            | EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::GoalCompleted { .. }
             | EventKind::Died { .. }

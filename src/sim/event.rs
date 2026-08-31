@@ -1,5 +1,5 @@
 use super::{
-    ActionRejection, AgentId, DeathCause, DialogueTone, EventId, Item, LocationId,
+    ActionRejection, AgentId, DeathCause, DialogueTone, EventId, Item, LocationId, Loot,
     ObservationTarget, Offering, Tick, TownEventKind,
 };
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,20 @@ pub enum EventKind {
         giver: AgentId,
         receiver: AgentId,
         item: Item,
+    },
+    Stole {
+        thief: AgentId,
+        victim: AgentId,
+        loot: Loot,
+    },
+    TheftFailed {
+        thief: AgentId,
+        victim: AgentId,
+        loot: Loot,
+    },
+    Robbed {
+        victim: AgentId,
+        loot: Loot,
     },
     Treated {
         agent: AgentId,

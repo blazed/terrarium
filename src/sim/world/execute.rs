@@ -1,6 +1,27 @@
 use super::*;
 
 impl World {
+    fn validate_colocated_target(
+        &self,
+        actor: AgentId,
+        target: AgentId,
+        location: LocationId,
+    ) -> Result<(), ActionRejection> {
+        if target == actor {
+            return Err(ActionRejection::SelfTarget(actor));
+        }
+        let Some(target_agent) = self.agents.get(&target) else {
+            return Err(ActionRejection::UnknownAgent(target));
+        };
+        if !target_agent.is_alive() {
+            return Err(ActionRejection::AgentDead(target));
+        }
+        if target_agent.location != location {
+            return Err(ActionRejection::NotCoLocated { actor, target });
+        }
+        Ok(())
+    }
+
     pub fn execute(&mut self, actor: AgentId, action: ProposedAction) -> ActionResult {
         let Some(agent) = self.agents.get(&actor) else {
             return self.reject(actor, None, ActionRejection::UnknownActor(actor));
@@ -101,25 +122,8 @@ impl World {
                 tone,
                 message,
             } => {
-                if target == actor {
-                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
-                }
-                let Some(target_agent) = self.agents.get(&target) else {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::UnknownAgent(target),
-                    );
-                };
-                if !target_agent.is_alive() {
-                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
-                }
-                if target_agent.location != current {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::NotCoLocated { actor, target },
-                    );
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
                 }
                 let message = message.trim();
                 if message.is_empty() {
@@ -145,25 +149,8 @@ impl World {
                 }
             }
             ProposedAction::Confront { target, claim } => {
-                if target == actor {
-                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
-                }
-                let Some(target_agent) = self.agents.get(&target) else {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::UnknownAgent(target),
-                    );
-                };
-                if !target_agent.is_alive() {
-                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
-                }
-                if target_agent.location != current {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::NotCoLocated { actor, target },
-                    );
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
                 }
                 let Some(rumor) = self.agents[&actor]
                     .rumors
@@ -338,26 +325,10 @@ impl World {
                 }
             }
             ProposedAction::Give { target, item } => {
-                if target == actor {
-                    return self.reject(actor, Some(current), ActionRejection::SelfTarget(actor));
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
                 }
-                let Some(receiver) = self.agents.get(&target) else {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::UnknownAgent(target),
-                    );
-                };
-                if !receiver.is_alive() {
-                    return self.reject(actor, Some(current), ActionRejection::AgentDead(target));
-                }
-                if receiver.location != current {
-                    return self.reject(
-                        actor,
-                        Some(current),
-                        ActionRejection::NotCoLocated { actor, target },
-                    );
-                }
+                let receiver = &self.agents[&target];
                 if agent.inventory.count(item) == 0 {
                     return self.reject(
                         actor,
@@ -379,6 +350,72 @@ impl World {
                     giver: actor,
                     receiver: target,
                     item,
+                }
+            }
+            ProposedAction::Steal { target, loot } => {
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
+                }
+                let target_agent = &self.agents[&target];
+                match loot {
+                    Loot::Coins(amount) => {
+                        if amount == 0 || target_agent.balance < amount {
+                            return self.reject(
+                                actor,
+                                Some(current),
+                                ActionRejection::LootNotOwned { target, loot },
+                            );
+                        }
+                        if agent.balance.checked_add(amount).is_none() {
+                            return self.reject(
+                                actor,
+                                Some(current),
+                                ActionRejection::EconomyOverflow,
+                            );
+                        }
+                    }
+                    Loot::Item(item) => {
+                        if target_agent.inventory.count(item) == 0 {
+                            return self.reject(
+                                actor,
+                                Some(current),
+                                ActionRejection::LootNotOwned { target, loot },
+                            );
+                        }
+                        if !agent.inventory.has_capacity(item) {
+                            return self.reject(
+                                actor,
+                                Some(current),
+                                ActionRejection::InventoryFull(item),
+                            );
+                        }
+                    }
+                }
+                let witnesses = self.locations[&current]
+                    .agents
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != actor && *id != target)
+                    .filter(|id| self.agents[id].activity.is_none())
+                    .count();
+                let victim_busy = target_agent.activity.is_some();
+                let probability = (0.55 + if victim_busy { 0.2 } else { 0.0 }
+                    - 0.1 * agent.personality.honesty
+                    - 0.1 * agent.personality.impulsiveness
+                    - 0.1 * witnesses as f32)
+                    .clamp(0.05, 0.95);
+                if self.seeded_roll(actor, target, probability) {
+                    EventKind::Stole {
+                        thief: actor,
+                        victim: target,
+                        loot,
+                    }
+                } else {
+                    EventKind::TheftFailed {
+                        thief: actor,
+                        victim: target,
+                        loot,
+                    }
                 }
             }
             ProposedAction::SeekTreatment => {
@@ -522,7 +559,17 @@ impl World {
             }
         }
         let completed_goal = self.advance_goal(actor, &kind);
+        let robbed = match &kind {
+            EventKind::Stole { victim, loot, .. } => Some(EventKind::Robbed {
+                victim: *victim,
+                loot: *loot,
+            }),
+            _ => None,
+        };
         let mut events = vec![self.append_event(Some(current), kind)];
+        if let Some(robbed) = robbed {
+            events.push(self.append_event(Some(current), robbed));
+        }
         if starts_recovery {
             events.push(
                 self.append_event(Some(current), EventKind::DiseaseRecovered { agent: actor }),

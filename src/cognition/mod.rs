@@ -1,7 +1,7 @@
 mod observation;
 
 pub use observation::{
-    AgentObservation, ConfrontationAffordance, LocationDescription, LocationSummary,
-    ObservationError, RouteHint, RouteHints, RumorSummary, SelfDescription, TownEventObservation,
-    VisibleAgent, perceive,
+    ActionAffordances, AgentObservation, AidAffordance, ConfrontationAffordance,
+    LocationDescription, LocationSummary, ObservationError, RouteHint, RouteHints, RumorSummary,
+    SelfDescription, StealAffordance, TownEventObservation, VisibleAgent, perceive,
 };

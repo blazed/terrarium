@@ -139,6 +139,9 @@ impl Report {
                         insolvent_employer_rejections += 1;
                     }
                 }
+                EventKind::Stole { .. }
+                | EventKind::TheftFailed { .. }
+                | EventKind::Robbed { .. } => {}
                 EventKind::TownEventStarted { .. }
                 | EventKind::TownEventEnded { .. }
                 | EventKind::Moved { .. }
@@ -459,6 +462,7 @@ fn rejection_name(reason: &ActionRejection) -> &'static str {
         ActionRejection::EmptyMessage => "empty_message",
         ActionRejection::InvalidMessage => "invalid_message",
         ActionRejection::MessageTooLong { .. } => "message_too_long",
+        ActionRejection::LootNotOwned { .. } => "loot_not_owned",
         ActionRejection::InvalidMembership(_) => "invalid_membership",
     }
 }

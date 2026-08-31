@@ -9,7 +9,8 @@ mod world;
 
 pub use action::{
     ActionRejection, ActionResult, Decision, DecisionSource, DialogueTone, Intention,
-    IntentionGoal, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
+    IntentionGoal, Loot, MAX_TALK_MESSAGE_CHARS, ObservationTarget, ProposedAction,
+    STEAL_COINS_CAP,
 };
 pub use agent::{
     Activity, ActivityKind, Agent, Belief, DeathCause, DiseaseState, Goal, GoalKind, GoalTarget,

@@ -2,7 +2,7 @@ use super::{
     ActionRejection, ActionResult, Activity, Agent, AgentId, BUSINESS_STARTING_CASH, Business,
     ConfrontationOutcome, DeathCause, Decision, DecisionSource, DialogueTone, DiseaseState, Event,
     EventId, EventKind, Goal, GoalKind, GoalTarget, Intention, IntentionGoal, Inventory, Item,
-    LifeState, Location, LocationId, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs,
+    LifeState, Location, LocationId, Loot, MAX_TALK_MESSAGE_CHARS, NEW_WORLD_START_HOUR, Needs,
     ObservationTarget, Occupation, Offering, OpeningHours, Personality, ProposedAction,
     Relationship, RoutingStats, Rumor, STARTING_STOCK, STOCK_PER_SHIFT, Tick, TownEvent,
     TownEventKind, WORK_WAGE, seeded_uuid,

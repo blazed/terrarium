@@ -65,6 +65,29 @@ impl World {
                 self.apply_dialogue_relationship(actor, *receiver, DialogueTone::Supportive, 0.5);
                 self.apply_dialogue_relationship(*receiver, actor, DialogueTone::Supportive, 1.5);
             }
+            EventKind::Stole { victim, loot, .. } => {
+                let thief = self.agents.get_mut(&actor).expect("validated thief");
+                match loot {
+                    Loot::Coins(amount) => {
+                        thief.balance = thief
+                            .balance
+                            .checked_add(*amount)
+                            .expect("validated theft balance");
+                    }
+                    Loot::Item(item) => thief.inventory.add(*item),
+                }
+                let victim_state = self.agents.get_mut(victim).expect("validated victim");
+                match loot {
+                    Loot::Coins(amount) => victim_state.balance -= *amount,
+                    Loot::Item(item) => victim_state.inventory.remove(*item),
+                }
+                victim_state.needs.safety = (victim_state.needs.safety - 0.15).max(0.0);
+            }
+            EventKind::TheftFailed { victim, .. } => {
+                if let Some(victim_state) = self.agents.get_mut(victim) {
+                    victim_state.needs.safety = (victim_state.needs.safety - 0.1).max(0.0);
+                }
+            }
             EventKind::ItemUsed { item, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     agent.inventory.remove(*item);
@@ -156,7 +179,8 @@ impl World {
             | EventKind::DiseaseSymptoms { .. }
             | EventKind::DiseaseRecovered { .. }
             | EventKind::DiseaseImmunityExpired { .. }
-            | EventKind::ActionRejected { .. } => {}
+            | EventKind::ActionRejected { .. }
+            | EventKind::Robbed { .. } => {}
         }
     }
 
@@ -238,6 +262,14 @@ impl World {
                 adjust(*target, target_change);
             }
             EventKind::Observed { observer, .. } => adjust(*observer, 0.02),
+            EventKind::Stole { thief, victim, .. } => {
+                adjust(*thief, 0.1);
+                adjust(*victim, -0.15);
+            }
+            EventKind::TheftFailed { thief, victim, .. } => {
+                adjust(*thief, -0.08);
+                adjust(*victim, -0.08);
+            }
             EventKind::GoalCompleted { agent, .. } => adjust(*agent, 0.15),
             EventKind::ActionRejected { agent, .. } => adjust(*agent, -0.06),
             EventKind::TownEventStarted { .. }
@@ -248,13 +280,34 @@ impl World {
             | EventKind::DiseaseSymptoms { .. }
             | EventKind::DiseaseRecovered { .. }
             | EventKind::DiseaseImmunityExpired { .. }
-            | EventKind::Waited { .. } => {}
+            | EventKind::Waited { .. }
+            | EventKind::Robbed { .. } => {}
         }
     }
 
     pub(super) fn remember(&mut self, event: &Event) {
         let mut witnesses = BTreeSet::new();
+        let mut blanket_location = true;
         match &event.kind {
+            EventKind::Stole { thief, victim, .. } => {
+                // Idle onlookers (and the thief) notice a successful theft; the victim
+                // only learns from the subject-free Robbed memory.
+                witnesses.insert(*thief);
+                if let Some(location) = event.location.and_then(|id| self.locations.get(&id)) {
+                    witnesses.extend(location.agents.iter().copied().filter(|id| {
+                        *id != *victim
+                            && self
+                                .agents
+                                .get(id)
+                                .is_some_and(|agent| agent.activity.is_none())
+                    }));
+                }
+                blanket_location = false;
+            }
+            EventKind::Robbed { victim, .. } => {
+                witnesses.insert(*victim);
+                blanket_location = false;
+            }
             EventKind::Moved { agent, to, .. } => {
                 witnesses.insert(*agent);
                 if let Some(destination) = self.locations.get(to) {
@@ -282,6 +335,9 @@ impl World {
                     witnesses.insert(*agent);
                 }
             }
+            EventKind::TheftFailed { thief, victim, .. } => {
+                witnesses.extend([*thief, *victim]);
+            }
             EventKind::Purchased { agent, .. }
             | EventKind::ItemUsed { agent, .. }
             | EventKind::Treated { agent, .. }
@@ -300,7 +356,9 @@ impl World {
             | EventKind::Waited { .. }
             | EventKind::ActionRejected { .. } => return,
         }
-        if let Some(location) = event.location.and_then(|id| self.locations.get(&id)) {
+        if blanket_location
+            && let Some(location) = event.location.and_then(|id| self.locations.get(&id))
+        {
             witnesses.extend(location.agents.iter().copied());
         }
 

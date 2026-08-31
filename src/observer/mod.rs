@@ -270,6 +270,8 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::Died { .. } => counts.deaths += 1,
             EventKind::Treated { .. } => counts.treatments += 1,
             EventKind::ActionRejected { .. } => counts.rejected += 1,
+            EventKind::Stole { .. } | EventKind::TheftFailed { .. } => counts.conversations += 0,
+            EventKind::Robbed { .. } => {}
             EventKind::DiseaseInfected { .. }
             | EventKind::DiseaseSymptoms { .. }
             | EventKind::DiseaseRecovered { .. }
@@ -418,6 +420,27 @@ pub fn render_event(world: &World, event: &Event) -> String {
             "{time}  {}'s action was rejected: {reason}",
             agent_name(world, *agent)
         ),
+        EventKind::Stole {
+            thief,
+            victim,
+            loot,
+        } => format!(
+            "{time}  {} stole {loot} from {}",
+            agent_name(world, *thief),
+            agent_name(world, *victim)
+        ),
+        EventKind::TheftFailed {
+            thief,
+            victim,
+            loot,
+        } => format!(
+            "{time}  {} tried to steal {loot} from {} and failed",
+            agent_name(world, *thief),
+            agent_name(world, *victim)
+        ),
+        EventKind::Robbed { victim, loot } => {
+            format!("{time}  {} had {loot} stolen", agent_name(world, *victim))
+        }
     }
 }
 

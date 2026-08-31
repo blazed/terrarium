@@ -2,6 +2,23 @@ use super::{AgentId, Event, Item, LocationId, Tick};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TALK_MESSAGE_CHARS: usize = 200;
+pub const STEAL_COINS_CAP: u64 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Loot {
+    Coins(u64),
+    Item(Item),
+}
+
+impl std::fmt::Display for Loot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Coins(amount) => write!(formatter, "{amount} coins"),
+            Self::Item(item) => write!(formatter, "a {item}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,6 +160,10 @@ pub enum ProposedAction {
         target: AgentId,
         item: Item,
     },
+    Steal {
+        target: AgentId,
+        loot: Loot,
+    },
     SeekTreatment,
     Rest,
     Work,
@@ -195,6 +216,8 @@ pub enum ActionRejection {
     ItemUnavailable(Item),
     #[error("agent {target} does not currently need {item}")]
     ItemNotNeeded { target: AgentId, item: Item },
+    #[error("target {target} does not own the requested loot {loot:?}")]
+    LootNotOwned { target: AgentId, loot: Loot },
     #[error("economy balance overflow")]
     EconomyOverflow,
     #[error("business at {location} cannot cover the {wage}-coin wage; cash is {available}")]
