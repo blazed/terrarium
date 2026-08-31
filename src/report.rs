@@ -1,6 +1,6 @@
 use crate::sim::{
     ActionRejection, AgentId, ConfrontationOutcome, DeathCause, DialogueTone, EventKind,
-    LocationId, NEW_WORLD_START_HOUR, Offering, Tick, World,
+    JAIL_TICKS, LocationId, NEW_WORLD_START_HOUR, Offering, Tick, World,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +12,7 @@ pub struct Report {
     pub social: SocialMetrics,
     pub economy: EconomyMetrics,
     pub behaviour: BehaviourMetrics,
+    pub crime: CrimeMetrics,
     pub llm: LlmMetrics,
 }
 
@@ -81,6 +82,17 @@ pub struct BehaviourMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CrimeMetrics {
+    pub thefts: u64,
+    pub thefts_failed: u64,
+    pub assaults: u64,
+    pub arrests: u64,
+    /// Resident-ticks served: JAIL_TICKS per arrest. The checkpoint does not
+    /// store per-agent served ticks, so the report approximates from the constant.
+    pub jail_ticks: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LlmMetrics {
     pub attempts: u64,
     pub decisions: u64,
@@ -103,6 +115,7 @@ impl Report {
         let mut insolvent_employer_rejections = 0;
         let mut goals_completed = 0;
         let mut waited_events = 0;
+        let mut crime = CrimeMetrics::default();
 
         for event in world.events() {
             match &event.kind {
@@ -139,12 +152,11 @@ impl Report {
                         insolvent_employer_rejections += 1;
                     }
                 }
-                EventKind::Stole { .. }
-                | EventKind::TheftFailed { .. }
-                | EventKind::Robbed { .. }
-                | EventKind::Assaulted { .. }
-                | EventKind::Arrested { .. }
-                | EventKind::Released { .. } => {}
+                EventKind::Stole { .. } => crime.thefts += 1,
+                EventKind::TheftFailed { .. } => crime.thefts_failed += 1,
+                EventKind::Assaulted { .. } => crime.assaults += 1,
+                EventKind::Arrested { .. } => crime.arrests += 1,
+                EventKind::Robbed { .. } | EventKind::Released { .. } => {}
                 EventKind::TownEventStarted { .. }
                 | EventKind::TownEventEnded { .. }
                 | EventKind::Moved { .. }
@@ -261,6 +273,10 @@ impl Report {
                     waited_events as f64 / world.events().len() as f64
                 },
             },
+            crime: CrimeMetrics {
+                jail_ticks: crime.arrests.saturating_mul(JAIL_TICKS),
+                ..crime
+            },
             llm,
         }
     }
@@ -359,6 +375,13 @@ impl Report {
                 self.run.events,
                 self.behaviour.waited_share * 100.0
             ),
+            "".into(),
+            "=== CRIME ===".into(),
+            format!("Thefts                     {}", self.crime.thefts),
+            format!("Thefts failed             {}", self.crime.thefts_failed),
+            format!("Assaults                  {}", self.crime.assaults),
+            format!("Arrests                   {}", self.crime.arrests),
+            format!("Jail ticks                {}", self.crime.jail_ticks),
             "".into(),
             "=== LLM ===".into(),
             format!("Attempts                   {}", self.llm.attempts),
@@ -498,10 +521,22 @@ mod tests {
             "=== SOCIAL ===",
             "=== ECONOMY ===",
             "=== BEHAVIOUR ===",
+            "=== CRIME ===",
             "=== LLM ===",
         ] {
             assert!(report.render_table().contains(heading));
         }
+        // Crime metrics survive the JSON round trip.
+        assert!(
+            report
+                .render_table()
+                .contains("Thefts                     ")
+        );
+        let crime = &report.crime;
+        assert_eq!(
+            crime.jail_ticks,
+            crime.arrests.saturating_mul(crate::sim::JAIL_TICKS)
+        );
         let json = serde_json::to_string(&report).expect("serialize report");
         assert_eq!(
             serde_json::from_str::<Report>(&json).expect("deserialize report"),
