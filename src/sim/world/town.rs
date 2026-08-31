@@ -12,6 +12,7 @@ impl World {
             "Abandoned Mill",
             "Carpenter's Workshop",
             "Briar Glen Clinic",
+            "Jail",
         ];
         let location_ids: Vec<_> = (0..location_names.len())
             .map(|index| LocationId(seeded_uuid(2, seed, index as u32)))
@@ -87,6 +88,7 @@ impl World {
             (6, 7),
             (2, 8),
             (5, 8),
+            (2, 9),
         ] {
             locations
                 .get_mut(&location_ids[left])

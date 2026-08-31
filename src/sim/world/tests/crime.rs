@@ -535,3 +535,403 @@ fn theft_roll_is_deterministic_per_seed_and_tick() {
     );
     assert_eq!(first.events(), second.events());
 }
+
+#[test]
+fn sheriff_arrests_a_witnessed_thief_and_the_term_expires() {
+    let (mut world, thief, victim) = failure_world();
+    let sheriff = world
+        .agents
+        .values()
+        .find(|agent| agent.occupation == Occupation::Sheriff)
+        .expect("sheriff")
+        .id;
+    // Everyone is idle together at Riverside Houses, so the attempt is witnessed
+    // by everyone present, including the sheriff.
+    assert!(matches!(
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            }
+        ),
+        ActionResult::Success(_)
+    ));
+    let attempt = world
+        .events()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::TheftFailed { .. }))
+        .expect("failed attempt")
+        .clone();
+    assert!(
+        world.agents[&sheriff]
+            .memories
+            .iter()
+            .any(|memory| memory.id == attempt.id)
+    );
+
+    let cash_before = town_hall(&world).business.expect("business").cash;
+
+    assert!(matches!(
+        world.execute(
+            sheriff,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        ),
+        ActionResult::Success(ref events)
+            if matches!(events[0].kind, EventKind::Arrested { fine: 10, .. })
+    ));
+    let jail = world
+        .locations
+        .values()
+        .find(|location| location.name == "Jail")
+        .expect("jail")
+        .id;
+    assert_eq!(world.agents[&thief].location, jail);
+    assert!(world.locations[&jail].agents.contains(&thief));
+    let activity = world.agents[&thief].activity.expect("jailed activity");
+    assert_eq!(activity.kind, ActivityKind::Jailed);
+    assert_eq!(activity.until, Tick(world.tick.0 + JAIL_TICKS));
+    assert_eq!(world.agents[&thief].balance, 20 - 10);
+    assert_eq!(
+        town_hall(&world).business.expect("business").cash,
+        cash_before + 10
+    );
+    // The scheduler skips the prisoner: they get no decision turns.
+    assert!(!Scheduler.agents_to_act(&world).contains(&thief));
+
+    // Only expiry frees them, back home and actionable again.
+    world
+        .advance_to(Tick(world.tick.0 + JAIL_TICKS))
+        .expect("term elapses");
+    assert!(
+        world
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Released { agent } if agent == thief))
+    );
+    assert_eq!(world.agents[&thief].location, world.agents[&thief].home);
+    assert!(world.agents[&thief].activity.is_none());
+    assert!(Scheduler.agents_to_act(&world).contains(&thief));
+}
+
+#[test]
+fn arrests_need_sheriff_co_location_and_witnessed_or_rumored_basis() {
+    let (mut world, thief, victim) = failure_world();
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let sheriff = world
+        .agents
+        .values()
+        .find(|agent| agent.occupation == Occupation::Sheriff)
+        .expect("sheriff")
+        .id;
+    let civilian = residents
+        .iter()
+        .copied()
+        .find(|id| *id != sheriff && *id != thief)
+        .expect("civilian");
+    let tavern = world
+        .locations
+        .values()
+        .find(|location| location.name == "The Crooked Lantern")
+        .expect("tavern")
+        .id;
+    // The sheriff is away when the theft fails, so nobody but the participants
+    // and onlookers at Riverside learn of it.
+    world.relocate(sheriff, tavern);
+    assert!(matches!(
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            }
+        ),
+        ActionResult::Success(_)
+    ));
+    let attempt = world
+        .events()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::TheftFailed { .. }))
+        .expect("failed attempt")
+        .clone();
+
+    // A civilian cannot arrest at all.
+    assert!(matches!(
+        world.execute(
+            civilian,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        ),
+        ActionResult::Rejected(ActionRejection::NotSheriff)
+    ));
+
+    // The sheriff must be co-located with their target.
+    assert!(matches!(
+        world.execute(
+            sheriff,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        ),
+        ActionResult::Rejected(ActionRejection::NotCoLocated { .. })
+    ));
+
+    // Co-located but without a witness memory or credible rumor: no legal basis.
+    world.relocate(sheriff, world.agents[&thief].location);
+    match world.execute(
+        sheriff,
+        ProposedAction::Arrest {
+            target: thief,
+            claim: attempt.id,
+        },
+    ) {
+        ActionResult::Rejected(ActionRejection::NoLegalBasis(claim)) => {
+            assert_eq!(claim, attempt.id);
+        }
+        other => panic!("expected no legal basis, got {other:?}"),
+    }
+
+    // A credible crime rumor (confidence >= 0.6) makes the arrest legal.
+    world
+        .agents
+        .get_mut(&sheriff)
+        .expect("sheriff")
+        .rumors
+        .push(Rumor {
+            event: attempt.clone(),
+            source: victim,
+            depth: 0,
+            confidence: 0.8,
+            resolved: false,
+        });
+    assert!(matches!(
+        world.execute(
+            sheriff,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        ),
+        ActionResult::Success(_)
+    ));
+}
+
+#[test]
+fn urgent_needs_and_storms_do_not_free_prisoners() {
+    let (mut world, thief, victim) = failure_world();
+    let sheriff = world
+        .agents
+        .values()
+        .find(|agent| agent.occupation == Occupation::Sheriff)
+        .expect("sheriff")
+        .id;
+    assert!(matches!(
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            }
+        ),
+        ActionResult::Success(_)
+    ));
+    let attempt = world
+        .events()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::TheftFailed { .. }))
+        .expect("failed attempt")
+        .clone();
+    world.execute(
+        sheriff,
+        ProposedAction::Arrest {
+            target: thief,
+            claim: attempt.id,
+        },
+    );
+    // Starving and caught in a storm: still confined.
+    let prisoner = world.agents.get_mut(&thief).expect("prisoner");
+    prisoner.needs.food = 0.05;
+    prisoner.needs.energy = 0.05;
+    prisoner.needs.safety = 0.05;
+    world.active_town_event = Some(TownEvent {
+        kind: TownEventKind::Storm,
+        starts_at: world.tick,
+        ends_at: Tick(world.tick.0 + 100),
+    });
+    world
+        .advance_to(Tick(world.tick.0 + 24))
+        .expect("storm passes");
+    assert_eq!(
+        world.agents[&thief].activity.expect("still jailed").kind,
+        ActivityKind::Jailed
+    );
+    let jail = world
+        .locations
+        .values()
+        .find(|location| location.name == "Jail")
+        .expect("jail")
+        .id;
+    assert_eq!(world.agents[&thief].location, jail);
+    assert_eq!(
+        world.agents[&thief].activity.expect("still jailed").kind,
+        ActivityKind::Jailed
+    );
+
+    world
+        .advance_to(world.agents[&thief].activity.expect("jailed").until)
+        .expect("term elapses");
+    assert_eq!(world.agents[&thief].location, world.agents[&thief].home);
+    assert!(world.agents[&thief].activity.is_none());
+}
+
+#[test]
+fn fine_is_skipped_when_the_prisoner_cannot_pay() {
+    let (mut world, thief, victim) = failure_world();
+    let sheriff = world
+        .agents
+        .values()
+        .find(|agent| agent.occupation == Occupation::Sheriff)
+        .expect("sheriff")
+        .id;
+    world.agents.get_mut(&thief).expect("thief").balance = 5;
+    assert!(matches!(
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            }
+        ),
+        ActionResult::Success(_)
+    ));
+    let attempt = world
+        .events()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::TheftFailed { .. }))
+        .expect("failed attempt")
+        .clone();
+    let cash_before = world
+        .locations
+        .values()
+        .find(|location| {
+            location
+                .business
+                .is_some_and(|business| business.offering == Offering::CivicServices)
+        })
+        .expect("town hall")
+        .business
+        .expect("business")
+        .cash;
+    assert!(matches!(
+        world.execute(
+            sheriff,
+            ProposedAction::Arrest {
+                target: thief,
+                claim: attempt.id,
+            },
+        ),
+        ActionResult::Success(ref events)
+            if matches!(events[0].kind, EventKind::Arrested { fine: 0, .. })
+    ));
+    assert_eq!(world.agents[&thief].balance, 5);
+    let cash_after = world
+        .locations
+        .values()
+        .find(|location| {
+            location
+                .business
+                .is_some_and(|business| business.offering == Offering::CivicServices)
+        })
+        .expect("town hall")
+        .business
+        .expect("business")
+        .cash;
+    assert_eq!(cash_after, cash_before);
+}
+
+#[test]
+fn checkpoint_round_trip_preserves_the_sentence_and_releases_after_resume() {
+    let (mut world, thief, victim) = failure_world();
+    let sheriff = world
+        .agents
+        .values()
+        .find(|agent| agent.occupation == Occupation::Sheriff)
+        .expect("sheriff")
+        .id;
+    assert!(matches!(
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            }
+        ),
+        ActionResult::Success(_)
+    ));
+    let attempt = world
+        .events()
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::TheftFailed { .. }))
+        .expect("failed attempt")
+        .clone();
+    world.execute(
+        sheriff,
+        ProposedAction::Arrest {
+            target: thief,
+            claim: attempt.id,
+        },
+    );
+    let jailed_until = world.agents[&thief].activity.expect("jailed").until;
+
+    let mut restored = World::from_snapshot(
+        world.name.clone(),
+        world.seed,
+        world.tick,
+        world.agents.values().cloned().collect(),
+        world.locations.values().cloned().collect(),
+        world.active_town_event,
+        world.events.clone(),
+    )
+    .expect("round trip accepts the sentence");
+    assert_eq!(
+        restored.agents[&thief].activity.expect("jailed").until,
+        jailed_until
+    );
+    restored
+        .advance_to(jailed_until)
+        .expect("term elapses after resume");
+    assert!(
+        restored
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::Released { agent } if agent == thief))
+    );
+    assert_eq!(
+        restored.agents[&thief].location,
+        restored.agents[&thief].home
+    );
+    assert!(restored.agents[&thief].activity.is_none());
+}
+
+fn town_hall(world: &World) -> &Location {
+    world
+        .locations
+        .values()
+        .find(|location| {
+            location
+                .business
+                .is_some_and(|business| business.offering == Offering::CivicServices)
+        })
+        .expect("town hall")
+}

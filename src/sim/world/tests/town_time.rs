@@ -4,7 +4,7 @@ use super::*;
 fn briar_glen_has_consistent_residents() {
     let world = World::briar_glen(814_921).expect("town should construct");
     assert_eq!(world.agents.len(), 8);
-    assert_eq!(world.locations.len(), 9);
+    assert_eq!(world.locations.len(), 10);
     assert_eq!(
         world
             .locations

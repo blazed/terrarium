@@ -81,6 +81,19 @@ impl World {
                         || !self.agents.contains_key(attacker)
                         || !self.agents.contains_key(victim)
                 }
+                EventKind::Arrested {
+                    officer,
+                    prisoner,
+                    claim,
+                    ..
+                } => {
+                    officer == prisoner
+                        || !self.agents.contains_key(officer)
+                        || !self.agents.contains_key(prisoner)
+                        || self.agents[officer].occupation != Occupation::Sheriff
+                        || !self.events.iter().any(|event| event.id == *claim)
+                }
+                EventKind::Released { agent } => !self.agents.contains_key(agent),
                 EventKind::Robbed { victim, .. } => !self.agents.contains_key(victim),
                 _ => false,
             };

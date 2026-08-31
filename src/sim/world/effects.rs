@@ -111,6 +111,33 @@ impl World {
                     attacker.needs.safety = (attacker.needs.safety - 0.05).max(0.0);
                 }
             }
+            EventKind::Arrested { prisoner, fine, .. } => {
+                // The prisoner is confined to Jail and pays the fine to Town Hall.
+                let jail = self
+                    .locations
+                    .values()
+                    .find(|location| location.name == "Jail")
+                    .expect("town has a jail")
+                    .id;
+                self.relocate(*prisoner, jail);
+                if *fine > 0 {
+                    if let Some(prisoner) = self.agents.get_mut(prisoner) {
+                        prisoner.balance -= *fine;
+                    }
+                    if let Some(town_hall) = self.locations.values_mut().find(|location| {
+                        location
+                            .business
+                            .is_some_and(|business| business.offering == Offering::CivicServices)
+                    }) {
+                        town_hall
+                            .business
+                            .as_mut()
+                            .expect("town hall business")
+                            .cash += *fine;
+                    }
+                }
+            }
+            EventKind::Released { .. } => {}
             EventKind::ItemUsed { item, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     agent.inventory.remove(*item);
@@ -300,6 +327,7 @@ impl World {
                     self.adjust_mood(*attacker, -0.15);
                 }
             }
+            EventKind::Arrested { prisoner, .. } => self.adjust_mood(*prisoner, -0.2),
             EventKind::GoalCompleted { agent, .. } => self.adjust_mood(*agent, 0.15),
             EventKind::ActionRejected { agent, .. } => self.adjust_mood(*agent, -0.06),
             EventKind::TownEventStarted { .. }
@@ -311,7 +339,8 @@ impl World {
             | EventKind::DiseaseRecovered { .. }
             | EventKind::DiseaseImmunityExpired { .. }
             | EventKind::Waited { .. }
-            | EventKind::Robbed { .. } => {}
+            | EventKind::Robbed { .. }
+            | EventKind::Released { .. } => {}
         }
     }
 
@@ -370,6 +399,14 @@ impl World {
             }
             EventKind::Assaulted { attacker, victim } => {
                 witnesses.extend([*attacker, *victim]);
+            }
+            EventKind::Arrested {
+                officer, prisoner, ..
+            } => {
+                witnesses.extend([*officer, *prisoner]);
+            }
+            EventKind::Released { agent } => {
+                witnesses.insert(*agent);
             }
             EventKind::Purchased { agent, .. }
             | EventKind::ItemUsed { agent, .. }

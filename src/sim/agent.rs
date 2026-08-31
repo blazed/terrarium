@@ -1,5 +1,6 @@
 use super::{
-    AgentId, DecisionSource, Event, EventKind, Intention, LocationId, Offering, Relationship, Tick,
+    AgentId, DecisionSource, Event, EventId, EventKind, Intention, LocationId, Offering,
+    Relationship, Tick,
 };
 
 pub const MAX_ITEMS_PER_KIND: u8 = 3;
@@ -322,6 +323,7 @@ pub enum ActivityKind {
     UsingItem,
     Stealing,
     Fighting,
+    Jailed,
     Treating,
     Resting,
     Working,
@@ -344,12 +346,14 @@ impl Activity {
             EventKind::ItemGiven { .. } => (ActivityKind::Helping, 3),
             EventKind::Stole { .. } | EventKind::TheftFailed { .. } => (ActivityKind::Stealing, 3),
             EventKind::Assaulted { .. } => (ActivityKind::Fighting, 3),
+            EventKind::Arrested { .. } => (ActivityKind::Jailed, 3),
             EventKind::ItemUsed { .. } => (ActivityKind::UsingItem, 1),
             EventKind::Treated { .. } => (ActivityKind::Treating, 6),
             EventKind::Rested { .. } => (ActivityKind::Resting, 12),
             EventKind::Worked { .. } => (ActivityKind::Working, 12),
             EventKind::Waited { .. } => (ActivityKind::Waiting, 1),
             EventKind::Robbed { .. }
+            | EventKind::Released { .. }
             | EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::GoalCompleted { .. }
@@ -446,6 +450,14 @@ pub struct Agent {
 impl Agent {
     pub fn is_alive(&self) -> bool {
         matches!(self.life, LifeState::Alive)
+    }
+
+    pub(crate) fn has_legal_basis(&self, claim: EventId) -> bool {
+        self.memories.iter().any(|memory| memory.id == claim)
+            || self
+                .rumors
+                .iter()
+                .any(|rumor| rumor.event.id == claim && rumor.confidence >= 0.6)
     }
 
     pub fn is_hungry(&self) -> bool {

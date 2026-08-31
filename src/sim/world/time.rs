@@ -165,6 +165,7 @@ impl World {
             );
         }
         let mut deaths = Vec::new();
+        let mut releases = Vec::new();
         for agent in self.agents.values_mut() {
             if !agent.is_alive() {
                 continue;
@@ -175,11 +176,17 @@ impl World {
             agent.decay_beliefs(elapsed);
             let urgent =
                 agent.needs.food < 0.1 || agent.needs.energy < 0.1 || agent.needs.safety < 0.1;
-            if agent
-                .activity
-                .is_some_and(|activity| activity.until <= proposed || urgent)
-            {
+            // Only a jail term's expiry frees a prisoner; storms or starvation never do.
+            let jailed_expiry = agent.activity.is_some_and(|activity| {
+                activity.kind == ActivityKind::Jailed && activity.until <= proposed
+            });
+            if agent.activity.is_some_and(|activity| {
+                activity.until <= proposed || (urgent && activity.kind != ActivityKind::Jailed)
+            }) {
                 agent.activity = None;
+                if jailed_expiry {
+                    releases.push(agent.id);
+                }
             }
             if agent
                 .intention
@@ -256,6 +263,14 @@ impl World {
         }
         for (agent, location, cause) in deaths {
             self.append_event(Some(location), EventKind::Died { agent, cause });
+        }
+        for agent in releases {
+            let Some(prisoner) = self.agents.get(&agent).filter(|agent| agent.is_alive()) else {
+                continue;
+            };
+            let home = prisoner.home;
+            self.relocate(agent, home);
+            self.append_event(Some(home), EventKind::Released { agent });
         }
         for agent in self.agents.values_mut().filter(|agent| agent.is_alive()) {
             if agent.intention.as_ref().is_some_and(|intention| {

@@ -427,6 +427,41 @@ impl World {
                     victim: target,
                 }
             }
+            ProposedAction::Arrest { target, claim } => {
+                if self.agents[&actor].occupation != Occupation::Sheriff {
+                    return self.reject(actor, Some(current), ActionRejection::NotSheriff);
+                }
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
+                }
+                let target_agent = &self.agents[&target];
+                let Some(event) = self.events.iter().find(|event| event.id == claim) else {
+                    return self.reject(actor, Some(current), ActionRejection::UnknownClaim(claim));
+                };
+                // Arrestable claims are crime events with a subject; Robbed has none.
+                if !matches!(event_evidence(&event.kind), Some((subject, ..)) if subject == target)
+                {
+                    return self.reject(
+                        actor,
+                        Some(current),
+                        ActionRejection::ClaimNotAboutTarget { claim, target },
+                    );
+                }
+                if !agent.has_legal_basis(claim) {
+                    return self.reject(actor, Some(current), ActionRejection::NoLegalBasis(claim));
+                }
+                let fine = if target_agent.balance >= JAIL_FINE {
+                    JAIL_FINE
+                } else {
+                    0
+                };
+                EventKind::Arrested {
+                    officer: actor,
+                    prisoner: target,
+                    claim,
+                    fine,
+                }
+            }
             ProposedAction::SeekTreatment => {
                 let Some(business) = self.locations[&current].business else {
                     return self.reject(
@@ -550,22 +585,36 @@ impl World {
             self.share_rumor(actor, *listener);
         }
         if let Some(mut activity) = Activity::from_event(&kind, self.tick) {
-            if self.agents[&actor].health < 0.5 {
+            if matches!(&kind, EventKind::Arrested { .. }) {
+                // A sentence is exactly one day and never doubles for poor health.
+                activity.until = Tick(self.tick.0.saturating_add(JAIL_TICKS));
+            } else if self.agents[&actor].health < 0.5 {
                 let duration = activity.until.0.saturating_sub(self.tick.0);
                 activity.until = Tick(self.tick.0.saturating_add(duration.saturating_mul(2)));
             }
-            self.agents.get_mut(&actor).expect("known actor").activity = Some(activity);
-            let other = match &kind {
-                EventKind::Spoke { listener, .. } => Some(*listener),
-                EventKind::Confronted { target, .. } => Some(*target),
-                EventKind::Assaulted { victim, .. } => Some(*victim),
-                _ => None,
-            };
-            if let Some(other) = other {
-                self.agents
-                    .get_mut(&other)
-                    .expect("validated resident")
-                    .activity = Some(activity);
+            match &kind {
+                // The prisoner serves the term; the sheriff goes on with the day.
+                EventKind::Arrested { prisoner, .. } => {
+                    self.agents
+                        .get_mut(prisoner)
+                        .expect("validated prisoner")
+                        .activity = Some(activity);
+                }
+                _ => {
+                    self.agents.get_mut(&actor).expect("known actor").activity = Some(activity);
+                    let other = match &kind {
+                        EventKind::Spoke { listener, .. } => Some(*listener),
+                        EventKind::Confronted { target, .. } => Some(*target),
+                        EventKind::Assaulted { victim, .. } => Some(*victim),
+                        _ => None,
+                    };
+                    if let Some(other) = other {
+                        self.agents
+                            .get_mut(&other)
+                            .expect("validated resident")
+                            .activity = Some(activity);
+                    }
+                }
             }
         }
         let completed_goal = self.advance_goal(actor, &kind);

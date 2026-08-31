@@ -142,7 +142,9 @@ impl Report {
                 EventKind::Stole { .. }
                 | EventKind::TheftFailed { .. }
                 | EventKind::Robbed { .. }
-                | EventKind::Assaulted { .. } => {}
+                | EventKind::Assaulted { .. }
+                | EventKind::Arrested { .. }
+                | EventKind::Released { .. } => {}
                 EventKind::TownEventStarted { .. }
                 | EventKind::TownEventEnded { .. }
                 | EventKind::Moved { .. }
@@ -464,6 +466,8 @@ fn rejection_name(reason: &ActionRejection) -> &'static str {
         ActionRejection::InvalidMessage => "invalid_message",
         ActionRejection::MessageTooLong { .. } => "message_too_long",
         ActionRejection::LootNotOwned { .. } => "loot_not_owned",
+        ActionRejection::NotSheriff => "not_sheriff",
+        ActionRejection::NoLegalBasis(_) => "no_legal_basis",
         ActionRejection::InvalidMembership(_) => "invalid_membership",
     }
 }

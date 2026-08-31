@@ -54,6 +54,10 @@ pub const STOCK_PER_SHIFT: u32 = 4;
 pub const STARTING_STOCK: u32 = 20;
 pub const WORK_WAGE: u64 = 10;
 pub const CRIME_COOLDOWN_TICKS: u64 = Tick::PER_DAY / 4;
+/// A jail term lasts one full day.
+pub const JAIL_TICKS: u64 = Tick::PER_DAY;
+/// Fine paid by a sentenced prisoner to Town Hall when they can afford it.
+pub const JAIL_FINE: u64 = 10;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

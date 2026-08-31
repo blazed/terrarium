@@ -93,7 +93,8 @@ fn durable_intention(
         ProposedAction::Work => Some(IntentionGoal::Work),
         ProposedAction::Steal { target, loot } => Some(IntentionGoal::StealFrom { target, loot }),
         ProposedAction::Attack { target } => Some(IntentionGoal::Attack { target }),
-        ProposedAction::ConsumeMeal
+        ProposedAction::Arrest { .. }
+        | ProposedAction::ConsumeMeal
         | ProposedAction::UseSupplies
         | ProposedAction::UseRepairKit
         | ProposedAction::UseMedicine
