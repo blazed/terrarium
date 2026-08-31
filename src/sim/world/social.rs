@@ -13,6 +13,7 @@ pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32
         EventKind::Stole { thief, .. } | EventKind::TheftFailed { thief, .. } => {
             Some((*thief, -0.2, -0.3, 0.6))
         }
+        EventKind::Assaulted { attacker, .. } => Some((*attacker, -0.3, -0.3, 0.6)),
         _ => None,
     }
 }

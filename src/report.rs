@@ -141,7 +141,8 @@ impl Report {
                 }
                 EventKind::Stole { .. }
                 | EventKind::TheftFailed { .. }
-                | EventKind::Robbed { .. } => {}
+                | EventKind::Robbed { .. }
+                | EventKind::Assaulted { .. } => {}
                 EventKind::TownEventStarted { .. }
                 | EventKind::TownEventEnded { .. }
                 | EventKind::Moved { .. }
