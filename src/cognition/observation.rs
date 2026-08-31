@@ -322,8 +322,19 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
         attack: visible_agents.iter().map(|agent| agent.id).collect(),
         arrest: if agent.occupation == Occupation::Sheriff {
             // Legal claims only: a crime event whose subject is present (co-located,
-            // alive) that the sheriff witnessed or learned via a rumor >= 0.6.
-            // Mirrors the Arrest validation in World::execute; no other basis exists.
+            // alive) that the sheriff witnessed or learned via a rumor >= 0.6, and
+            // that has not already been judged (double jeopardy). Mirrors the Arrest
+            // validation in World::execute; no other basis exists.
+            let already_judged = |claim: EventId| {
+                world.events().iter().any(|event| {
+                    matches!(
+                        &event.kind,
+                        EventKind::Arrested {
+                            claim: judged, ..
+                        } if *judged == claim
+                    )
+                })
+            };
             let mut options = Vec::new();
             for visible in &visible_agents {
                 for event in world.events() {
@@ -333,6 +344,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                         event_evidence(&event.kind),
                         Some((subject, ..)) if subject == visible.id
                     ) || !agent.has_legal_basis(event.id)
+                        || already_judged(event.id)
                     {
                         continue;
                     }
