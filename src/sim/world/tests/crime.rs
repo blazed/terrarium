@@ -335,6 +335,183 @@ fn checkpoint_round_trip_preserves_crime_events_and_history() {
 }
 
 #[test]
+fn assault_injures_victim_and_drops_their_relationship() {
+    let mut world = World::briar_glen(21).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let attacker = residents[0];
+    let victim = residents[1];
+    world
+        .agents
+        .get_mut(&attacker)
+        .expect("attacker")
+        .personality
+        .agreeableness = 1.0;
+    let health_before = world.agents[&victim].health;
+    let safety_before = world.agents[&victim].needs.safety;
+    let attacker_mood_before = world.agents[&attacker].mood;
+    let victim_mood_before = world.agents[&victim].mood;
+
+    assert!(matches!(
+        world.execute(attacker, ProposedAction::Attack { target: victim }),
+        ActionResult::Success(ref events)
+            if matches!(events[0].kind, EventKind::Assaulted { .. })
+    ));
+    let victim_state = &world.agents[&victim];
+    assert_eq!(victim_state.health, health_before - 0.35);
+    assert!(victim_state.injury);
+    assert!(victim_state.needs.safety < safety_before);
+    assert!(victim_state.mood < victim_mood_before);
+    // Remorseful (agreeable) attacker's mood drops.
+    assert!(world.agents[&attacker].mood < attacker_mood_before);
+    let relationship = victim_state.relationships[&attacker];
+    assert!(relationship.affection < 0.0);
+    assert!(relationship.trust < 0.0);
+    assert!(relationship.respect < 0.0);
+    assert!(relationship.suspicion > 0.0);
+    // Both participants got the Fighting activity.
+    assert!(world.agents[&attacker].activity.is_some());
+    assert!(world.agents[&victim].activity.is_some());
+}
+
+#[test]
+fn unremorseful_attacker_keeps_mood() {
+    let mut world = World::briar_glen(22).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let attacker = residents[0];
+    let victim = residents[1];
+    world
+        .agents
+        .get_mut(&attacker)
+        .expect("attacker")
+        .personality
+        .agreeableness = 0.0;
+    let mood_before = world.agents[&attacker].mood;
+    world.execute(attacker, ProposedAction::Attack { target: victim });
+    assert_eq!(world.agents[&attacker].mood, mood_before);
+}
+
+#[test]
+fn assault_witnesses_learn_hostility_about_the_attacker() {
+    let mut world = World::briar_glen(23).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let attacker = residents[0];
+    let victim = residents[1];
+    let witness = residents[3];
+
+    world.execute(attacker, ProposedAction::Attack { target: victim });
+
+    for resident in [victim, witness] {
+        let belief = world.agents[&resident].beliefs[&attacker];
+        assert!(
+            belief.hostility > 0.5,
+            "resident {resident} learned weak hostility"
+        );
+    }
+    // The attacker does not learn about themselves.
+    assert!(
+        world.agents[&attacker]
+            .beliefs
+            .get(&attacker)
+            .is_none_or(|belief| belief.hostility == 0.0)
+    );
+}
+
+#[test]
+fn assault_rejections_are_atomic() {
+    let mut world = World::briar_glen(24).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let attacker = residents[0];
+    let victim = residents[1];
+
+    assert_eq!(
+        world.execute(attacker, ProposedAction::Attack { target: attacker }),
+        ActionResult::Rejected(ActionRejection::SelfTarget(attacker))
+    );
+    assert_eq!(
+        world.execute(
+            attacker,
+            ProposedAction::Attack {
+                target: AgentId(Uuid::nil())
+            }
+        ),
+        ActionResult::Rejected(ActionRejection::UnknownAgent(AgentId(Uuid::nil())))
+    );
+
+    world.agents.get_mut(&victim).expect("victim").life = LifeState::Dead {
+        tick: world.tick,
+        cause: DeathCause::Disease,
+    };
+    assert_eq!(
+        world.execute(attacker, ProposedAction::Attack { target: victim }),
+        ActionResult::Rejected(ActionRejection::AgentDead(victim))
+    );
+
+    let mut world = World::briar_glen(25).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let attacker = residents[0];
+    let tavern = world
+        .locations
+        .values()
+        .find(|location| location.name == "The Crooked Lantern")
+        .map(|location| location.id)
+        .expect("tavern");
+    world.relocate(residents[2], tavern);
+    assert_eq!(
+        world.execute(
+            attacker,
+            ProposedAction::Attack {
+                target: residents[2]
+            }
+        ),
+        ActionResult::Rejected(ActionRejection::NotCoLocated {
+            actor: attacker,
+            target: residents[2],
+        })
+    );
+}
+
+#[test]
+fn assault_round_trips_and_self_assault_is_rejected_by_history() {
+    let mut world = World::briar_glen(26).expect("town");
+    let attacker = *world.agents.keys().next().expect("resident");
+    let victim = *world.agents.keys().nth(1).expect("resident");
+    world.execute(attacker, ProposedAction::Attack { target: victim });
+    let restored = World::from_snapshot(
+        world.name.clone(),
+        world.seed,
+        world.tick,
+        world.agents.values().cloned().collect(),
+        world.locations.values().cloned().collect(),
+        world.active_town_event,
+        world.events.clone(),
+    )
+    .expect("valid assault round trips");
+    assert_eq!(restored.events(), world.events());
+
+    let mut invalid = World::briar_glen(27).expect("town");
+    let attacker = *invalid.agents.keys().next().expect("resident");
+    invalid.append_event(
+        None,
+        EventKind::Assaulted {
+            attacker,
+            victim: attacker,
+        },
+    );
+    assert!(matches!(
+        World::from_snapshot(
+            invalid.name.clone(),
+            invalid.seed,
+            invalid.tick,
+            invalid.agents.values().cloned().collect(),
+            invalid.locations.values().cloned().collect(),
+            invalid.active_town_event,
+            invalid.events.clone(),
+        ),
+        Err(WorldError::InvalidState(_))
+    ));
+}
+
+#[test]
 fn theft_roll_is_deterministic_per_seed_and_tick() {
     let (mut first, thief, victim, _first_idle) = success_world();
     first.agents.get_mut(&victim).expect("victim").balance = 20;

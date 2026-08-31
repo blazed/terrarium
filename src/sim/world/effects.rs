@@ -88,6 +88,25 @@ impl World {
                     victim_state.needs.safety = (victim_state.needs.safety - 0.1).max(0.0);
                 }
             }
+            EventKind::Assaulted { victim, .. } => {
+                {
+                    let victim_state = self.agents.get_mut(victim).expect("validated victim");
+                    victim_state.health = (victim_state.health - 0.35).max(0.0);
+                    victim_state.injury = true;
+                    victim_state.needs.safety = (victim_state.needs.safety - 0.2).max(0.0);
+                    let relationship = victim_state
+                        .relationships
+                        .entry(actor)
+                        .or_insert(Relationship::NEUTRAL);
+                    relationship.affection = (relationship.affection - 0.2).clamp(-1.0, 1.0);
+                    relationship.trust = (relationship.trust - 0.25).clamp(-1.0, 1.0);
+                    relationship.respect = (relationship.respect - 0.2).clamp(-1.0, 1.0);
+                    relationship.suspicion = (relationship.suspicion + 0.3).clamp(-1.0, 1.0);
+                }
+                if let Some(attacker) = self.agents.get_mut(&actor) {
+                    attacker.needs.safety = (attacker.needs.safety - 0.05).max(0.0);
+                }
+            }
             EventKind::ItemUsed { item, .. } => {
                 if let Some(agent) = self.agents.get_mut(&actor) {
                     agent.inventory.remove(*item);
@@ -214,12 +233,13 @@ impl World {
         }
     }
 
+    fn adjust_mood(&mut self, id: AgentId, amount: f32) {
+        if let Some(agent) = self.agents.get_mut(&id) {
+            agent.mood = (agent.mood + amount).clamp(-1.0, 1.0);
+        }
+    }
+
     pub(super) fn apply_mood_effects(&mut self, kind: &EventKind) {
-        let mut adjust = |id: AgentId, amount: f32| {
-            if let Some(agent) = self.agents.get_mut(&id) {
-                agent.mood = (agent.mood + amount).clamp(-1.0, 1.0);
-            }
-        };
         match kind {
             EventKind::Spoke {
                 speaker,
@@ -233,20 +253,20 @@ impl World {
                     DialogueTone::Neutral => (0.01, 0.01),
                     DialogueTone::Tense => (-0.08, -0.06),
                 };
-                adjust(*speaker, speaker_change);
-                adjust(*listener, listener_change);
+                self.adjust_mood(*speaker, speaker_change);
+                self.adjust_mood(*listener, listener_change);
             }
-            EventKind::Purchased { agent, .. } => adjust(*agent, 0.06),
+            EventKind::Purchased { agent, .. } => self.adjust_mood(*agent, 0.06),
             EventKind::ItemGiven {
                 giver, receiver, ..
             } => {
-                adjust(*giver, 0.05);
-                adjust(*receiver, 0.08);
+                self.adjust_mood(*giver, 0.05);
+                self.adjust_mood(*receiver, 0.08);
             }
-            EventKind::ItemUsed { agent, .. } => adjust(*agent, 0.04),
-            EventKind::Treated { agent, .. } => adjust(*agent, 0.1),
-            EventKind::Rested { agent } => adjust(*agent, 0.08),
-            EventKind::Worked { agent, .. } => adjust(*agent, 0.03),
+            EventKind::ItemUsed { agent, .. } => self.adjust_mood(*agent, 0.04),
+            EventKind::Treated { agent, .. } => self.adjust_mood(*agent, 0.1),
+            EventKind::Rested { agent } => self.adjust_mood(*agent, 0.08),
+            EventKind::Worked { agent, .. } => self.adjust_mood(*agent, 0.03),
             EventKind::Confronted {
                 accuser,
                 target,
@@ -258,20 +278,26 @@ impl World {
                     ConfrontationOutcome::Denied => (-0.06, -0.05),
                     ConfrontationOutcome::Challenged => (-0.03, -0.04),
                 };
-                adjust(*accuser, accuser_change);
-                adjust(*target, target_change);
+                self.adjust_mood(*accuser, accuser_change);
+                self.adjust_mood(*target, target_change);
             }
-            EventKind::Observed { observer, .. } => adjust(*observer, 0.02),
+            EventKind::Observed { observer, .. } => self.adjust_mood(*observer, 0.02),
             EventKind::Stole { thief, victim, .. } => {
-                adjust(*thief, 0.1);
-                adjust(*victim, -0.15);
+                self.adjust_mood(*thief, 0.1);
+                self.adjust_mood(*victim, -0.15);
             }
             EventKind::TheftFailed { thief, victim, .. } => {
-                adjust(*thief, -0.08);
-                adjust(*victim, -0.08);
+                self.adjust_mood(*thief, -0.08);
+                self.adjust_mood(*victim, -0.08);
             }
-            EventKind::GoalCompleted { agent, .. } => adjust(*agent, 0.15),
-            EventKind::ActionRejected { agent, .. } => adjust(*agent, -0.06),
+            EventKind::Assaulted { attacker, victim } => {
+                self.adjust_mood(*victim, -0.25);
+                if self.agents[attacker].personality.agreeableness >= 0.5 {
+                    self.adjust_mood(*attacker, -0.15);
+                }
+            }
+            EventKind::GoalCompleted { agent, .. } => self.adjust_mood(*agent, 0.15),
+            EventKind::ActionRejected { agent, .. } => self.adjust_mood(*agent, -0.06),
             EventKind::TownEventStarted { .. }
             | EventKind::TownEventEnded { .. }
             | EventKind::Moved { .. }
@@ -337,6 +363,9 @@ impl World {
             }
             EventKind::TheftFailed { thief, victim, .. } => {
                 witnesses.extend([*thief, *victim]);
+            }
+            EventKind::Assaulted { attacker, victim } => {
+                witnesses.extend([*attacker, *victim]);
             }
             EventKind::Purchased { agent, .. }
             | EventKind::ItemUsed { agent, .. }

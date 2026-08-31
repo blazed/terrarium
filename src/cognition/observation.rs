@@ -584,6 +584,14 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             format!("Someone stole {loot} from you.")
         }
         EventKind::Robbed { .. } => "Something was stolen.".into(),
+        EventKind::Assaulted { attacker, victim } if *victim == observer => {
+            format!("{} attacked you.", agent_name(*attacker))
+        }
+        EventKind::Assaulted { attacker, victim } => format!(
+            "{} attacked {}.",
+            agent_name(*attacker),
+            agent_name(*victim)
+        ),
         EventKind::ItemUsed { agent, item } if *agent == observer => {
             format!("You used a {item}.")
         }

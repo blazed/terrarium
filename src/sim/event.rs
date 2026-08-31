@@ -89,6 +89,10 @@ pub enum EventKind {
         victim: AgentId,
         loot: Loot,
     },
+    Assaulted {
+        attacker: AgentId,
+        victim: AgentId,
+    },
     Treated {
         agent: AgentId,
         cost: u64,

@@ -418,6 +418,15 @@ impl World {
                     }
                 }
             }
+            ProposedAction::Attack { target } => {
+                if let Err(reason) = self.validate_colocated_target(actor, target, current) {
+                    return self.reject(actor, Some(current), reason);
+                }
+                EventKind::Assaulted {
+                    attacker: actor,
+                    victim: target,
+                }
+            }
             ProposedAction::SeekTreatment => {
                 let Some(business) = self.locations[&current].business else {
                     return self.reject(
@@ -549,6 +558,7 @@ impl World {
             let other = match &kind {
                 EventKind::Spoke { listener, .. } => Some(*listener),
                 EventKind::Confronted { target, .. } => Some(*target),
+                EventKind::Assaulted { victim, .. } => Some(*victim),
                 _ => None,
             };
             if let Some(other) = other {

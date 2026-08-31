@@ -164,6 +164,9 @@ pub enum ProposedAction {
         target: AgentId,
         loot: Loot,
     },
+    Attack {
+        target: AgentId,
+    },
     SeekTreatment,
     Rest,
     Work,

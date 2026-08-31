@@ -96,6 +96,7 @@ fn durable_intention(
         | ProposedAction::UseRepairKit
         | ProposedAction::UseMedicine
         | ProposedAction::Steal { .. }
+        | ProposedAction::Attack { .. }
         | ProposedAction::Wait => None,
     }
 }

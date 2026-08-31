@@ -76,6 +76,11 @@ impl World {
                         || !self.agents.contains_key(thief)
                         || !self.agents.contains_key(victim)
                 }
+                EventKind::Assaulted { attacker, victim } => {
+                    attacker == victim
+                        || !self.agents.contains_key(attacker)
+                        || !self.agents.contains_key(victim)
+                }
                 EventKind::Robbed { victim, .. } => !self.agents.contains_key(victim),
                 _ => false,
             };
