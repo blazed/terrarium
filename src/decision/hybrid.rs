@@ -91,12 +91,12 @@ fn durable_intention(
         ProposedAction::Give { target, item } => Some(IntentionGoal::Give { target, item }),
         ProposedAction::Rest => Some(IntentionGoal::Rest),
         ProposedAction::Work => Some(IntentionGoal::Work),
+        ProposedAction::Steal { target, loot } => Some(IntentionGoal::StealFrom { target, loot }),
+        ProposedAction::Attack { target } => Some(IntentionGoal::Attack { target }),
         ProposedAction::ConsumeMeal
         | ProposedAction::UseSupplies
         | ProposedAction::UseRepairKit
         | ProposedAction::UseMedicine
-        | ProposedAction::Steal { .. }
-        | ProposedAction::Attack { .. }
         | ProposedAction::Wait => None,
     }
 }
@@ -116,7 +116,7 @@ fn is_adaptive(action: &ProposedAction) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::HybridDecisionEngine;
+    use super::{HybridDecisionEngine, durable_intention};
     use crate::{
         cognition::perceive,
         decision::{DecisionEngine, DecisionError, LocalDecisionEngine},
@@ -395,5 +395,63 @@ mod tests {
         assert_eq!(decision.action, ProposedAction::Wait);
         assert_eq!(decision.source, DecisionSource::LlmFallback);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn crime_actions_never_trigger_an_llm_consult() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let target = observation().visible_agents[0].id;
+        for local in [
+            ProposedAction::Steal {
+                target,
+                loot: crate::sim::Loot::Coins(1),
+            },
+            ProposedAction::Attack { target },
+        ] {
+            let mut engine = engine(local.clone(), ProposedAction::Wait, calls.clone(), false);
+            let decision = engine.decide(&observation()).await.expect("decision");
+            assert_eq!(decision.action, local);
+            assert_eq!(decision.source, DecisionSource::Local);
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_proposed_crime_gets_a_durable_intention() {
+        // The LLM can only be consulted for adaptive actions, but when it is, its
+        // crime proposals must map onto durable intentions for the runner to pursue.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observation = observation();
+        let target = observation.visible_agents[0].id;
+        let mut engine = engine(
+            ProposedAction::Talk {
+                target,
+                tone: crate::sim::DialogueTone::Friendly,
+                message: "hello".into(),
+            },
+            ProposedAction::Steal {
+                target,
+                loot: crate::sim::Loot::Coins(1),
+            },
+            calls.clone(),
+            false,
+        );
+        let decision = engine.decide(&observation).await.expect("decision");
+        assert_eq!(
+            decision.action,
+            ProposedAction::Pursue {
+                intention: IntentionGoal::StealFrom {
+                    target,
+                    loot: crate::sim::Loot::Coins(1)
+                }
+            }
+        );
+        assert_eq!(decision.source, DecisionSource::Llm);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        assert_eq!(
+            durable_intention(&observation, ProposedAction::Attack { target }),
+            Some(IntentionGoal::Attack { target })
+        );
     }
 }

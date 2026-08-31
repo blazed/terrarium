@@ -324,6 +324,27 @@ impl World {
                             && self.agents.get(target).is_some_and(Agent::is_alive)
                             && self.events.iter().any(|event| event.id == *claim)
                     }
+                    IntentionGoal::StealFrom { target, loot } => {
+                        let target_owned = match loot {
+                            Loot::Coins(amount) => {
+                                *amount > 0
+                                    && self
+                                        .agents
+                                        .get(target)
+                                        .is_some_and(|agent| agent.balance >= *amount)
+                            }
+                            Loot::Item(item) => self
+                                .agents
+                                .get(target)
+                                .is_some_and(|agent| agent.inventory.count(*item) > 0),
+                        };
+                        target != id
+                            && self.agents.get(target).is_some_and(Agent::is_alive)
+                            && target_owned
+                    }
+                    IntentionGoal::Attack { target } => {
+                        target != id && self.agents.get(target).is_some_and(Agent::is_alive)
+                    }
                 };
                 if intention.expires_at <= self.tick || !target_is_valid {
                     return Err(WorldError::InvalidState(format!(

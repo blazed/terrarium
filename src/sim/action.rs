@@ -76,6 +76,13 @@ pub enum IntentionGoal {
         target: AgentId,
         claim: super::EventId,
     },
+    StealFrom {
+        target: AgentId,
+        loot: Loot,
+    },
+    Attack {
+        target: AgentId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

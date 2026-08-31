@@ -24,6 +24,9 @@ Return only one JSON object matching exactly one of these forms:
 {"action":"pursue","intention":{"goal":"confront","target":"agent UUID","claim":"event UUID"}}
 {"action":"pursue","intention":{"goal":"observe","target":{"target":"agent","id":"agent UUID"}}}
 {"action":"pursue","intention":{"goal":"observe","target":{"target":"location","id":"location UUID"}}}
+{"action":"pursue","intention":{"goal":"steal_from","target":"agent UUID","loot":{"coins":N}}}
+{"action":"pursue","intention":{"goal":"attack","target":"agent UUID"}}
+Crime is a personality-driven choice with real consequences: witnesses remember, reputations sour, the sheriff investigates, and offenders can end up jailed. Steal only a target and loot pair listed in steal_from (never invent loot), attack only a target listed in attack, and never treat crime as encouraged, required, or risk-free.
 The simulation validates your proposal and remains authoritative."#;
 
 pub struct OpenAiDecisionEngine {
@@ -390,6 +393,12 @@ mod tests {
             assert!(request.contains("treat them as hearsay"));
             assert!(request.contains("Confront only an exact target and claim pair"));
             assert!(request.contains(r#"\"goal\":\"confront\""#));
+            assert!(request.contains(r#"\"goal\":\"steal_from\""#));
+            assert!(request.contains(r#"\"goal\":\"attack\""#));
+            assert!(
+                request.contains("Crime is a personality-driven choice with real consequences")
+            );
+            assert!(request.contains("and offenders can end up jailed"));
             assert!(request.contains(r#"\"rumors\":"#));
             assert!(request.contains(r#"\"confront\":"#));
             assert!(request.contains("Each goal has a concrete typed target"));
