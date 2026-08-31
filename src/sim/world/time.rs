@@ -125,15 +125,22 @@ impl World {
     }
 
     fn disease_exposure_succeeds(&self, source: AgentId, target: AgentId) -> bool {
-        let source = source.0.as_u128();
-        let target = target.0.as_u128();
+        self.seeded_roll(source, target, 0.35)
+    }
+
+    /// Deterministic seeded roll from (seed, tick, two agent ids). Pure: same inputs
+    /// always produce the same outcome, so split and checkpointed runs match.
+    /// Order of the ids is irrelevant (XOR mixing).
+    pub(super) fn seeded_roll(&self, first: AgentId, second: AgentId, probability: f32) -> bool {
+        let first = first.0.as_u128();
+        let second = second.0.as_u128();
         let mixed = self.seed
             ^ self.tick.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            ^ source as u64
-            ^ (source >> 64) as u64
-            ^ target as u64
-            ^ (target >> 64) as u64;
-        StdRng::seed_from_u64(mixed).random_bool(0.35)
+            ^ first as u64
+            ^ (first >> 64) as u64
+            ^ second as u64
+            ^ (second >> 64) as u64;
+        StdRng::seed_from_u64(mixed).random_bool(probability as f64)
     }
 
     pub fn advance_to(&mut self, proposed: Tick) -> Result<(), WorldError> {

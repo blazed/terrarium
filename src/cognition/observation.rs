@@ -1,8 +1,8 @@
 use crate::sim::{
     Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, HealthCondition,
-    Intention, Inventory, Item, LifeState, LocationId, Needs, ObservationTarget, Occupation,
-    Offering, OpeningHours, Personality, Relationship, RoutingStats, Tick, TownEventKind, World,
-    event_evidence,
+    Intention, Inventory, Item, LifeState, LocationId, Loot, Needs, ObservationTarget, Occupation,
+    Offering, OpeningHours, Personality, Relationship, RoutingStats, STEAL_COINS_CAP, Tick,
+    TownEventKind, World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +53,12 @@ pub struct AidAffordance {
     pub item: Item,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StealAffordance {
+    pub target: AgentId,
+    pub loot: Loot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionAffordances {
     pub move_to: Vec<LocationId>,
@@ -64,6 +70,7 @@ pub struct ActionAffordances {
     pub can_use_repair_kit: bool,
     pub can_use_medicine: bool,
     pub give: Vec<AidAffordance>,
+    pub steal_from: Vec<StealAffordance>,
     pub can_seek_treatment: bool,
     pub can_rest: bool,
     pub can_work: bool,
@@ -280,6 +287,24 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                         target: visible.id,
                         item,
                     })
+            })
+            .collect(),
+        steal_from: visible_agents
+            .iter()
+            .flat_map(|visible| {
+                let victim = &world.agents[&visible.id];
+                [Item::Meal, Item::Supplies, Item::RepairKit, Item::Medicine]
+                    .into_iter()
+                    .filter(|item| victim.inventory.count(*item) > 0)
+                    .map(|item| StealAffordance {
+                        target: visible.id,
+                        loot: Loot::Item(item),
+                    })
+                    // Cap keeps the victim's exact balance hidden above the cap.
+                    .chain((victim.balance > 0).then_some(StealAffordance {
+                        target: visible.id,
+                        loot: Loot::Coins(victim.balance.min(STEAL_COINS_CAP)),
+                    }))
             })
             .collect(),
         can_seek_treatment: location.business.is_some_and(|business| {
@@ -530,6 +555,35 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             offering,
             cost,
         } => format!("{} bought {offering} for {cost} coins.", agent_name(*agent)),
+        EventKind::Stole {
+            thief,
+            victim,
+            loot,
+        } if *thief == observer => {
+            format!("You stole {loot} from {}.", agent_name(*victim))
+        }
+        EventKind::Stole {
+            thief,
+            victim,
+            loot,
+        } => format!(
+            "{} stole {loot} from {}.",
+            agent_name(*thief),
+            agent_name(*victim)
+        ),
+        EventKind::TheftFailed {
+            thief,
+            victim,
+            loot,
+        } => format!(
+            "{} failed to steal {loot} from {}.",
+            agent_name(*thief),
+            agent_name(*victim)
+        ),
+        EventKind::Robbed { victim, loot } if *victim == observer => {
+            format!("Someone stole {loot} from you.")
+        }
+        EventKind::Robbed { .. } => "Something was stolen.".into(),
         EventKind::ItemUsed { agent, item } if *agent == observer => {
             format!("You used a {item}.")
         }

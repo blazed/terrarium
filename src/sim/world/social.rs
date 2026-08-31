@@ -10,6 +10,9 @@ pub(crate) fn event_evidence(kind: &EventKind) -> Option<(AgentId, f32, f32, f32
         }),
         EventKind::Worked { agent, .. } => Some((*agent, 0.0, 0.08, 0.0)),
         EventKind::ItemGiven { giver, .. } => Some((*giver, 0.05, 0.08, -0.02)),
+        EventKind::Stole { thief, .. } | EventKind::TheftFailed { thief, .. } => {
+            Some((*thief, -0.2, -0.3, 0.6))
+        }
         _ => None,
     }
 }

@@ -69,6 +69,22 @@ impl World {
                     event.id
                 )));
             }
+            let invalid_crime = match &event.kind {
+                EventKind::Stole { thief, victim, .. }
+                | EventKind::TheftFailed { thief, victim, .. } => {
+                    thief == victim
+                        || !self.agents.contains_key(thief)
+                        || !self.agents.contains_key(victim)
+                }
+                EventKind::Robbed { victim, .. } => !self.agents.contains_key(victim),
+                _ => false,
+            };
+            if invalid_crime {
+                return Err(WorldError::InvalidState(format!(
+                    "event {} references invalid crime participants",
+                    event.id
+                )));
+            }
             let invalid_transaction = match &event.kind {
                 EventKind::Purchased { offering, cost, .. } => event
                     .location
