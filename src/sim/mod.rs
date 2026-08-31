@@ -53,6 +53,7 @@ pub const BUSINESS_STARTING_CASH: u64 = 100;
 pub const STOCK_PER_SHIFT: u32 = 4;
 pub const STARTING_STOCK: u32 = 20;
 pub const WORK_WAGE: u64 = 10;
+pub const CRIME_COOLDOWN_TICKS: u64 = Tick::PER_DAY / 4;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

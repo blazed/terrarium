@@ -1,14 +1,25 @@
 use super::{DecisionEngine, DecisionError};
 use crate::{
-    cognition::{AgentObservation, RouteHint, VisibleAgent},
+    cognition::{AgentObservation, RouteHint, StealAffordance, VisibleAgent},
     sim::{
-        Business, Decision, DialogueTone, GoalKind, GoalTarget, HealthCondition, IntentionGoal,
-        ObservationTarget, Offering, ProposedAction, Tick, TownEventKind,
+        AgentId, Business, Decision, DialogueTone, GoalKind, GoalTarget, HealthCondition,
+        IntentionGoal, Item, Loot, ObservationTarget, Offering, ProposedAction, Tick,
+        TownEventKind,
     },
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 const RECENT_CONVERSATION_TICKS: u64 = Tick::PER_DAY / 4;
+
+fn loot_value(loot: Loot) -> u32 {
+    match loot {
+        Loot::Coins(amount) => amount as u32,
+        Loot::Item(Item::Meal) => 5,
+        Loot::Item(Item::Supplies) => 6,
+        Loot::Item(Item::RepairKit) => 8,
+        Loot::Item(Item::Medicine) => 12,
+    }
+}
 
 fn recently_spoken(observation: &AgentObservation, agent: &VisibleAgent) -> bool {
     agent
@@ -163,6 +174,84 @@ impl LocalDecisionEngine {
             && let Some(action) = work_action(observation)
         {
             return Ok(action);
+        }
+
+        // Crime: desperate, impulsive, dishonest residents steal; aggrieved,
+        // hostile residents attack. Both branches are observation-only, pick
+        // deterministically (no rng), and are paced by a cooldown derived from the
+        // crime event log, so checkpoint resumes match uninterrupted runs.
+        // ponytail: gates tuned to briar_glen's personality spread (honesty ~0.5..0.9,
+        // agreeableness ~0.4..0.85): the caps admit only the less honest / less
+        // agreeable residents, and CRIME_COOLDOWN_TICKS brakes repeat offenses. Baseline
+        // 10 seeds x 30 days at these values landed ~67 thefts and ~2 assaults per seed
+        // (>1 of each across seeds). Confidence decay was slowed to 0.0002/tick so
+        // hostility beliefs survive days (see agent.rs decay_beliefs). Re-run baseline
+        // when the town roster changes. Upgrade path: move caps into town definition
+        // data once several towns exist.
+        if (needs.money < 0.35 || needs.food < 0.3)
+            && personality.honesty < 0.75
+            && personality.impulsiveness >= 0.4
+            && observation
+                .self_description
+                .next_crime
+                .is_none_or(|until| observation.tick >= until)
+            && !observation.action_affordances.steal_from.is_empty()
+        {
+            let occupied = |affordance: &StealAffordance| {
+                observation
+                    .visible_agents
+                    .iter()
+                    .find(|visible| visible.id == affordance.target)
+                    .is_some_and(|visible| visible.activity.is_some())
+            };
+            if let Some(best) =
+                observation
+                    .action_affordances
+                    .steal_from
+                    .iter()
+                    .max_by(|left, right| {
+                        occupied(left)
+                            .cmp(&occupied(right))
+                            .then_with(|| loot_value(left.loot).cmp(&loot_value(right.loot)))
+                            .then_with(|| right.target.cmp(&left.target))
+                    })
+            {
+                return Ok(ProposedAction::Steal {
+                    target: best.target,
+                    loot: best.loot,
+                });
+            }
+        }
+        if personality.agreeableness < 0.6
+            && mood < 0.1
+            && observation
+                .self_description
+                .next_crime
+                .is_none_or(|until| observation.tick >= until)
+            && !observation.action_affordances.attack.is_empty()
+        {
+            let hostile = |target: AgentId| {
+                observation
+                    .beliefs
+                    .get(&target)
+                    .is_some_and(|belief| belief.hostility >= 0.6 && belief.confidence >= 0.35)
+            };
+            if let Some(target) = observation
+                .action_affordances
+                .attack
+                .iter()
+                .copied()
+                .filter(|target| hostile(*target))
+                .max_by(|left, right| {
+                    // Deterministic: most hostile belief wins, lowest id breaks ties.
+                    let hostility = |id: AgentId| observation.beliefs[&id].hostility;
+                    hostility(*left)
+                        .total_cmp(&hostility(*right))
+                        .then_with(|| right.cmp(left))
+                })
+            {
+                return Ok(ProposedAction::Attack { target });
+            }
         }
 
         if let Some(aid) = observation
@@ -553,8 +642,8 @@ mod tests {
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         decision::DecisionEngine,
         sim::{
-            Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget, IntentionGoal, Item,
-            Offering, ProposedAction, Relationship, Tick, World,
+            Activity, ActivityKind, Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget,
+            IntentionGoal, Item, Loot, Needs, Offering, ProposedAction, Relationship, Tick, World,
         },
     };
     use uuid::Uuid;
@@ -1200,5 +1289,130 @@ mod tests {
                 .action,
             ProposedAction::SeekTreatment
         );
+    }
+
+    #[tokio::test]
+    async fn low_honesty_broke_resident_steals_and_prefers_occupied_targets() {
+        let world = World::briar_glen(41).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.personality.honesty = 0.3;
+        observation.self_description.personality.impulsiveness = 0.8;
+        // All needs healthy except money so no survival branch steals the turn.
+        observation.self_description.needs = Needs {
+            money: 0.2,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.goals.clear();
+        assert!(!observation.action_affordances.steal_from.is_empty());
+        assert!(matches!(
+            LocalDecisionEngine::new(41)
+                .decide(&observation)
+                .await
+                .expect("steal decision")
+                .action,
+            ProposedAction::Steal { .. }
+        ));
+
+        // Mark one resident busy: the thief must pick them over idle victims.
+        let busy = observation.visible_agents[1].id;
+        observation.visible_agents[1].activity = Some(Activity {
+            kind: ActivityKind::Resting,
+            until: Tick(10_000),
+        });
+        assert_eq!(
+            LocalDecisionEngine::new(41)
+                .decide(&observation)
+                .await
+                .expect("steal decision")
+                .action,
+            ProposedAction::Steal {
+                target: busy,
+                loot: Loot::Coins(10)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn high_honesty_resident_never_steals() {
+        let world = World::briar_glen(42).expect("town");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.personality.honesty = 1.0;
+        observation.self_description.personality.impulsiveness = 0.8;
+        observation.self_description.needs = Needs {
+            money: 0.2,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.goals.clear();
+        assert!(!observation.action_affordances.steal_from.is_empty());
+        assert!(!matches!(
+            LocalDecisionEngine::new(42)
+                .decide(&observation)
+                .await
+                .expect("honest decision")
+                .action,
+            ProposedAction::Steal { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hostile_resident_attacks_the_believed_target_only() {
+        // A low-agreeableness resident in a bad mood attacks the person they
+        // hold a confident high-hostility belief about.
+        let mut world = World::briar_glen(43).expect("town");
+        world
+            .advance_to(Tick(9 * 60 / Tick::MINUTES))
+            .expect("morning");
+        let actor = *world.agents.keys().next().expect("resident");
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation.self_description.personality.agreeableness = 0.2;
+        observation.self_description.mood = -0.4;
+        observation.self_description.needs = Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.goals.clear();
+        let target = observation.visible_agents[1].id;
+        observation.beliefs.insert(
+            target,
+            Belief {
+                sociability: 0.5,
+                reliability: 0.5,
+                hostility: 0.9,
+                confidence: 0.8,
+            },
+        );
+        assert_eq!(
+            LocalDecisionEngine::new(43)
+                .decide(&observation)
+                .await
+                .expect("attack decision")
+                .action,
+            ProposedAction::Attack { target }
+        );
+
+        // A neutral mood means no attack, even with the same belief.
+        observation.self_description.mood = 0.1;
+        assert!(!matches!(
+            LocalDecisionEngine::new(43)
+                .decide(&observation)
+                .await
+                .expect("calm decision")
+                .action,
+            ProposedAction::Attack { .. }
+        ));
     }
 }

@@ -1,8 +1,8 @@
 use crate::sim::{
-    Activity, AgentId, Belief, Business, Event, EventId, EventKind, Goal, HealthCondition,
-    Intention, Inventory, Item, LifeState, LocationId, Loot, Needs, ObservationTarget, Occupation,
-    Offering, OpeningHours, Personality, Relationship, RoutingStats, STEAL_COINS_CAP, Tick,
-    TownEventKind, World, event_evidence,
+    Activity, AgentId, Belief, Business, CRIME_COOLDOWN_TICKS, Event, EventId, EventKind, Goal,
+    HealthCondition, Intention, Inventory, Item, LifeState, LocationId, Loot, Needs,
+    ObservationTarget, Occupation, Offering, OpeningHours, Personality, Relationship, RoutingStats,
+    STEAL_COINS_CAP, Tick, TownEventKind, World, event_evidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +71,7 @@ pub struct ActionAffordances {
     pub can_use_medicine: bool,
     pub give: Vec<AidAffordance>,
     pub steal_from: Vec<StealAffordance>,
+    pub attack: Vec<AgentId>,
     pub can_seek_treatment: bool,
     pub can_rest: bool,
     pub can_work: bool,
@@ -115,6 +116,8 @@ pub struct SelfDescription {
     pub activity: Option<Activity>,
     pub intention: Option<Intention>,
     pub mood: f32,
+    // Earliest tick this agent may commit crime again (world-derived, checkpoint-safe).
+    pub next_crime: Option<Tick>,
     pub health: f32,
     pub injury: bool,
     pub conditions: Vec<HealthCondition>,
@@ -307,6 +310,7 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
                     }))
             })
             .collect(),
+        attack: visible_agents.iter().map(|agent| agent.id).collect(),
         can_seek_treatment: location.business.is_some_and(|business| {
             business.offering == Offering::Medicine
                 && world.is_location_open(location.id)
@@ -392,6 +396,21 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             activity: agent.activity,
             intention: agent.intention.clone(),
             mood: agent.mood,
+            next_crime: world
+                .events()
+                .iter()
+                .rev()
+                .find_map(|event| {
+                    let culprit = match &event.kind {
+                        EventKind::Stole { thief, .. } | EventKind::TheftFailed { thief, .. } => {
+                            thief
+                        }
+                        EventKind::Assaulted { attacker, .. } => attacker,
+                        _ => return None,
+                    };
+                    (*culprit == agent.id).then_some(Tick(event.tick.0 + CRIME_COOLDOWN_TICKS))
+                })
+                .filter(|until| world.tick < *until),
             health: agent.health,
             injury: agent.injury,
             conditions: agent.health_conditions(),

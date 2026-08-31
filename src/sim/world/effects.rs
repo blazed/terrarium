@@ -91,7 +91,11 @@ impl World {
             EventKind::Assaulted { victim, .. } => {
                 {
                     let victim_state = self.agents.get_mut(victim).expect("validated victim");
-                    victim_state.health = (victim_state.health - 0.35).max(0.0);
+                    // ponytail: floor at 0.01 instead of 0.0 because death is processed
+                    // only in advance_to — an alive agent with health exactly 0.0 fails
+                    // validate(). Repeated assaults still push the victim toward real death
+                    // via the normal injury/needs damage path.
+                    victim_state.health = (victim_state.health - 0.35).max(0.01);
                     victim_state.injury = true;
                     victim_state.needs.safety = (victim_state.needs.safety - 0.2).max(0.0);
                     let relationship = victim_state

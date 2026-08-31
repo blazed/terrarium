@@ -507,7 +507,12 @@ impl Agent {
     }
 
     pub(super) fn decay_beliefs(&mut self, ticks: u64) {
-        let decay = 0.001 * ticks as f32;
+        // ponytail: 0.001/tick made crime activation impossible (an exposure's +0.15
+        // confidence decayed away within a few hours, so the attack gate's 0.35+ never
+        // coincided with a visible target). 0.0002/tick keeps a multi-exposure belief
+        // for days. Mild M2 side effect: companion preference is stickier. Tune with
+        // the M3 crime baseline.
+        let decay = 0.0002 * ticks as f32;
         for belief in self.beliefs.values_mut() {
             belief.confidence = (belief.confidence - decay).max(0.0);
         }
