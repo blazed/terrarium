@@ -272,6 +272,7 @@ fn event_counts(world: &World) -> EventCounts {
             EventKind::ActionRejected { .. } => counts.rejected += 1,
             EventKind::Stole { .. } | EventKind::TheftFailed { .. } => counts.conversations += 0,
             EventKind::Robbed { .. } | EventKind::Assaulted { .. } => {}
+            EventKind::Arrested { .. } | EventKind::Released { .. } => {}
             EventKind::DiseaseInfected { .. }
             | EventKind::DiseaseSymptoms { .. }
             | EventKind::DiseaseRecovered { .. }
@@ -446,6 +447,22 @@ pub fn render_event(world: &World, event: &Event) -> String {
             agent_name(world, *attacker),
             agent_name(world, *victim)
         ),
+        EventKind::Arrested {
+            officer,
+            prisoner,
+            claim,
+            fine: _fine,
+        } => format!(
+            "{time}  {} arrested {} ({claim})",
+            agent_name(world, *officer),
+            agent_name(world, *prisoner)
+        ),
+        EventKind::Released { agent } => {
+            format!(
+                "{time}  {} was released from the jail",
+                agent_name(world, *agent)
+            )
+        }
     }
 }
 

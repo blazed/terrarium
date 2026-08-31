@@ -174,6 +174,10 @@ pub enum ProposedAction {
     Attack {
         target: AgentId,
     },
+    Arrest {
+        target: AgentId,
+        claim: super::EventId,
+    },
     SeekTreatment,
     Rest,
     Work,
@@ -250,6 +254,10 @@ pub enum ActionRejection {
     OutsideWorkingHours(u64),
     #[error("actor does not know rumor claim {0}")]
     UnknownClaim(super::EventId),
+    #[error("only the sheriff may arrest")]
+    NotSheriff,
+    #[error("no witnessed or credible rumor basis for claim {0}")]
+    NoLegalBasis(super::EventId),
     #[error("rumor claim {claim} is not about target {target}")]
     ClaimNotAboutTarget {
         claim: super::EventId,

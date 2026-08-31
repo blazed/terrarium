@@ -93,6 +93,15 @@ pub enum EventKind {
         attacker: AgentId,
         victim: AgentId,
     },
+    Arrested {
+        officer: AgentId,
+        prisoner: AgentId,
+        claim: EventId,
+        fine: u64,
+    },
+    Released {
+        agent: AgentId,
+    },
     Treated {
         agent: AgentId,
         cost: u64,

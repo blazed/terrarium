@@ -611,6 +611,20 @@ fn describe_memory(world: &World, observer: AgentId, event: &Event) -> String {
             agent_name(*attacker),
             agent_name(*victim)
         ),
+        EventKind::Arrested {
+            officer, prisoner, ..
+        } if *prisoner == observer => {
+            format!("{} arrested you.", agent_name(*officer))
+        }
+        EventKind::Arrested {
+            officer, prisoner, ..
+        } => format!(
+            "{} arrested {}.",
+            agent_name(*officer),
+            agent_name(*prisoner)
+        ),
+        EventKind::Released { agent } if *agent == observer => "You were released.".into(),
+        EventKind::Released { agent } => format!("{} was released.", agent_name(*agent)),
         EventKind::ItemUsed { agent, item } if *agent == observer => {
             format!("You used a {item}.")
         }
