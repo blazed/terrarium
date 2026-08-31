@@ -400,3 +400,55 @@ fn known_but_absent_agent_cannot_be_addressed() {
         ActionResult::Rejected(ActionRejection::NotCoLocated { actor, target })
     );
 }
+
+#[test]
+fn crime_rumors_spread_louder_than_neutral_gossip() {
+    // Identical speaker/trust profiles and listener across both worlds: a crime
+    // memory gets a higher shared confidence than a neutral one (crime base 1.0
+    // vs 0.9), so the sheriff hears about thefts before ordinary chatter.
+    fn shared_confidence(crime: bool) -> f32 {
+        let mut world = World::briar_glen(44).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let speaker = residents[0];
+        let listener = residents[1];
+        world
+            .agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .personality
+            .honesty = 0.8;
+        let event = if crime {
+            let thief = residents[2];
+            let victim = residents[3];
+            world.append_event(
+                None,
+                EventKind::Stole {
+                    thief,
+                    victim,
+                    loot: Loot::Coins(1),
+                },
+            )
+        } else {
+            world.append_event(
+                None,
+                EventKind::Worked {
+                    agent: speaker,
+                    wage: WORK_WAGE,
+                    stock_produced: 0,
+                },
+            )
+        };
+        world
+            .agents
+            .get_mut(&speaker)
+            .expect("speaker")
+            .memories
+            .push(event);
+        world.share_rumor(speaker, listener);
+        world.agents[&listener].rumors[0].confidence
+    }
+    assert!(
+        shared_confidence(true) > shared_confidence(false),
+        "crime gossip must spread louder than neutral gossip"
+    );
+}

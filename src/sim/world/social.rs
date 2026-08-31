@@ -28,12 +28,24 @@ impl World {
             .chain(listener_state.rumors.iter().map(|rumor| rumor.event.id))
             .collect::<BTreeSet<_>>();
         let Some((event, depth, base_confidence)) = self.agents.get(&speaker).and_then(|agent| {
+            // ponytail: crime gossip spreads louder than neutral gossip — memory
+            // base 1.0 (vs 0.9) and a gentler depth decay (0.75 vs 0.7). Tuned so a
+            // sheriff hears about a theft fast enough to act on it (#15/#16); the
+            // honesty/trust discounting below still bounds the final confidence.
+            let crime = |kind: &EventKind| {
+                matches!(
+                    kind,
+                    EventKind::Stole { .. }
+                        | EventKind::TheftFailed { .. }
+                        | EventKind::Assaulted { .. }
+                )
+            };
             agent
                 .memories
                 .iter()
                 .rev()
                 .find(|event| !known.contains(&event.id))
-                .map(|event| (event.clone(), 1, 0.9))
+                .map(|event| (event.clone(), 1, if crime(&event.kind) { 1.0 } else { 0.9 }))
                 .or_else(|| {
                     agent
                         .rumors
@@ -41,10 +53,14 @@ impl World {
                         .rev()
                         .find(|rumor| !known.contains(&rumor.event.id))
                         .and_then(|rumor| {
-                            rumor
-                                .depth
-                                .checked_add(1)
-                                .map(|depth| (rumor.event.clone(), depth, rumor.confidence * 0.7))
+                            rumor.depth.checked_add(1).map(|depth| {
+                                (
+                                    rumor.event.clone(),
+                                    depth,
+                                    rumor.confidence
+                                        * if crime(&rumor.event.kind) { 0.75 } else { 0.7 },
+                                )
+                            })
                         })
                 })
         }) else {

@@ -27,6 +27,16 @@ fn recently_spoken(observation: &AgentObservation, agent: &VisibleAgent) -> bool
         .is_some_and(|last| observation.tick.0.saturating_sub(last.0) < RECENT_CONVERSATION_TICKS)
 }
 
+/// A subject the actor holds a confident high-hostility belief about: excluded
+/// from companionship, aid, and (via the attack gate) a safe neighbor. Thresholds
+/// stay in sync with the #13 attack gate.
+fn is_known_hostile(observation: &AgentObservation, subject: AgentId) -> bool {
+    observation
+        .beliefs
+        .get(&subject)
+        .is_some_and(|belief| belief.hostility >= 0.6 && belief.confidence >= 0.35)
+}
+
 fn preferred_companion(
     observation: &AgentObservation,
     allow_recent: bool,
@@ -47,6 +57,7 @@ fn preferred_companion(
         .visible_agents
         .iter()
         .filter(|agent| observation.action_affordances.talk_to.contains(&agent.id))
+        .filter(|agent| !is_known_hostile(observation, agent.id))
         .filter(|agent| allow_recent || !recently_spoken(observation, agent))
         .max_by(|left, right| {
             (!recently_spoken(observation, left))
@@ -253,19 +264,12 @@ impl LocalDecisionEngine {
                 .next_crime
                 .is_none_or(|until| observation.tick >= until)
             && !observation.action_affordances.attack.is_empty()
-        {
-            let hostile = |target: AgentId| {
-                observation
-                    .beliefs
-                    .get(&target)
-                    .is_some_and(|belief| belief.hostility >= 0.6 && belief.confidence >= 0.35)
-            };
-            if let Some(target) = observation
+            && let Some(target) = observation
                 .action_affordances
                 .attack
                 .iter()
                 .copied()
-                .filter(|target| hostile(*target))
+                .filter(|target| is_known_hostile(observation, *target))
                 .max_by(|left, right| {
                     // Deterministic: most hostile belief wins, lowest id breaks ties.
                     let hostility = |id: AgentId| observation.beliefs[&id].hostility;
@@ -273,9 +277,8 @@ impl LocalDecisionEngine {
                         .total_cmp(&hostility(*right))
                         .then_with(|| right.cmp(left))
                 })
-            {
-                return Ok(ProposedAction::Attack { target });
-            }
+        {
+            return Ok(ProposedAction::Attack { target });
         }
 
         if let Some(aid) = observation
@@ -283,6 +286,7 @@ impl LocalDecisionEngine {
             .give
             .iter()
             .filter(|aid| observation.self_description.inventory.count(aid.item) > 1)
+            .filter(|aid| !is_known_hostile(observation, aid.target))
             .filter(|aid| {
                 observation
                     .visible_agents
@@ -948,15 +952,19 @@ mod tests {
         observation
             .visible_agents
             .retain(|agent| agent.id == preferred);
+        // A *confident* high-hostility belief excludes the suspect entirely (#17);
+        // a weak belief (confidence below the exclusion threshold) only tints tone.
         observation.beliefs.insert(
             preferred,
             Belief {
                 sociability: 0.5,
                 reliability: 0.5,
-                hostility: 1.0,
-                confidence: 1.0,
+                hostility: 0.9,
+                confidence: 0.3,
             },
         );
+        observation.self_description.personality.agreeableness = 0.6;
+        observation.self_description.mood = -0.6;
         assert!(matches!(
             engine.decide(&observation).await.expect("decision").action,
             ProposedAction::Talk {
@@ -1652,5 +1660,82 @@ mod tests {
         );
         let observation = perceive(&world, civilian).expect("observation");
         assert!(observation.action_affordances.arrest.is_empty());
+    }
+
+    #[tokio::test]
+    async fn known_thieves_are_excluded_from_companionship_and_aid() {
+        let mut world = World::briar_glen(45).expect("town");
+        let residents = world.agents.keys().copied().collect::<Vec<_>>();
+        let actor = residents[0];
+        let thief = residents[1];
+        let neutral = residents[2];
+        // The thief is the better-liked friend on paper; the confident hostile
+        // belief must make them impossible to choose regardless of score. Only the
+        // thief and the neutral resident are needy / visible, so the choice is
+        // forced between the two.
+        world.agents.get_mut(&actor).expect("actor").inventory.meals = 2;
+        for id in [thief, neutral] {
+            world.agents.get_mut(&id).expect("needy").needs.food = 0.1;
+        }
+        for id in residents.iter().copied() {
+            if id != thief && id != neutral {
+                world.agents.get_mut(&id).expect("full").needs.food = 1.0;
+            }
+        }
+        let mut observation = perceive(&world, actor).expect("observation");
+        observation
+            .visible_agents
+            .retain(|visible| visible.id == thief || visible.id == neutral);
+        observation.self_description.personality.agreeableness = 1.0;
+        observation.self_description.mood = 0.1;
+        observation.self_description.inventory.meals = 2;
+        let full = Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.beliefs.insert(
+            thief,
+            Belief {
+                sociability: 0.5,
+                reliability: 0.5,
+                hostility: 0.9,
+                confidence: 0.8,
+            },
+        );
+        observation.goals.clear();
+
+        // Low companionship: the only idle partner is the neutral resident.
+        observation.self_description.needs = Needs {
+            companionship: 0.1,
+            ..full
+        };
+        let decision = LocalDecisionEngine::new(45)
+            .decide(&observation)
+            .await
+            .expect("companionship decision");
+        // The known thief is unchoosable; the neutral resident gets the talk.
+        assert!(matches!(
+            decision.action,
+            ProposedAction::Talk { target: talked, .. } if talked == neutral
+        ));
+
+        // Companionable again but with supplies to spare: aid goes to the neutral
+        // resident, never to the known thief.
+        observation.self_description.needs = full;
+        let decision = LocalDecisionEngine::new(45)
+            .decide(&observation)
+            .await
+            .expect("aid decision");
+        assert_eq!(
+            decision.action,
+            ProposedAction::Give {
+                target: neutral,
+                item: Item::Meal,
+            }
+        );
     }
 }
