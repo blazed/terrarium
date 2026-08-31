@@ -11,7 +11,7 @@ use terrarium::{
         DEFAULT_LLM_CALLS_PER_DAY, HybridDecisionEngine, LocalDecisionEngine, OpenAiApi,
         OpenAiDecisionEngine, ReasoningEffort,
     },
-    observer::{render_dashboard, render_event, render_run_since, render_summary},
+    observer::{render_dashboard, render_event, render_run_since},
     persistence::{load_world, save_world},
     report::Report,
     runner::{LlmDecisionAudit, run_simulation, run_simulation_with_audit},
@@ -50,15 +50,26 @@ enum DecisionArgs {
 #[derive(Debug, PartialEq)]
 enum Command {
     Run(RunArgs),
-    Inspect(PathBuf),
-    Report { path: PathBuf, json: bool },
-    Chronicle { path: PathBuf, all: bool },
+    Inspect {
+        path: PathBuf,
+        report: bool,
+        chronicle: bool,
+        all: bool,
+    },
+    Report {
+        path: PathBuf,
+        json: bool,
+    },
+    Chronicle {
+        path: PathBuf,
+        all: bool,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH\n       terrarium report PATH [--json]\n       terrarium chronicle PATH [--all]"
+        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH [--report | --chronicle [--all]]\n       terrarium report PATH [--json]\n       terrarium chronicle PATH [--all]"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -87,10 +98,26 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
         Some("run") => parse_run_args(args).map(Command::Run),
         Some("inspect") => {
             let path = args.next().ok_or(CliError::Usage)?;
-            if args.next().is_some() {
+            let mut report = false;
+            let mut chronicle = false;
+            let mut all = false;
+            for flag in args {
+                match flag.as_str() {
+                    "--report" => report = true,
+                    "--chronicle" => chronicle = true,
+                    "--all" => all = true,
+                    _ => return Err(CliError::Usage),
+                }
+            }
+            if (report && chronicle) || (all && !chronicle) {
                 return Err(CliError::Usage);
             }
-            Ok(Command::Inspect(path.into()))
+            Ok(Command::Inspect {
+                path: path.into(),
+                report,
+                chronicle,
+                all,
+            })
         }
         Some("report") => {
             let path = args.next().ok_or(CliError::Usage)?;
@@ -553,7 +580,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if live {
                 println!("{}", render_dashboard(&world));
             } else if streamed {
-                println!("\n{}", render_summary(&world));
+                println!("\n{}", Report::from_world(&world).render_table());
             } else {
                 println!("{}", render_run_since(&world, first_event));
             }
@@ -561,7 +588,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 println!("{summary}");
             }
         }
-        Command::Inspect(path) => println!("{}", render_dashboard(&load_world(path)?)),
+        Command::Inspect {
+            path,
+            report,
+            chronicle,
+            all,
+        } => {
+            let world = load_world(path)?;
+            if report {
+                println!("{}", Report::from_world(&world).render_table());
+            } else if chronicle {
+                println!("{}", render_chronicle(&world, all));
+            } else {
+                println!("{}", render_dashboard(&world));
+            }
+        }
         Command::Report { path, json } => {
             let report = Report::from_world(&load_world(path)?);
             if json {
@@ -621,7 +662,38 @@ mod tests {
         );
         assert_eq!(
             parse_args(args(&["inspect", "run.sqlite"])),
-            Ok(Command::Inspect(PathBuf::from("run.sqlite")))
+            Ok(Command::Inspect {
+                path: PathBuf::from("run.sqlite"),
+                report: false,
+                chronicle: false,
+                all: false,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["inspect", "run.sqlite", "--report"])),
+            Ok(Command::Inspect {
+                path: PathBuf::from("run.sqlite"),
+                report: true,
+                chronicle: false,
+                all: false,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["inspect", "run.sqlite", "--chronicle", "--all"])),
+            Ok(Command::Inspect {
+                path: PathBuf::from("run.sqlite"),
+                report: false,
+                chronicle: true,
+                all: true,
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["inspect", "run.sqlite", "--all"])),
+            Err(CliError::Usage)
+        );
+        assert_eq!(
+            parse_args(args(&["inspect", "run.sqlite", "--report", "--chronicle"])),
+            Err(CliError::Usage)
         );
         assert_eq!(
             parse_args(args(&["report", "run.sqlite"])),

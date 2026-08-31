@@ -1,6 +1,10 @@
-use crate::sim::{
-    Agent, AgentId, Event, EventKind, IntentionGoal, LifeState, LocationId, ObservationTarget,
-    RoutingStats, World,
+use crate::{
+    chronicle::render_last_day,
+    report::Report,
+    sim::{
+        Agent, AgentId, Event, EventKind, IntentionGoal, LifeState, LocationId, ObservationTarget,
+        RoutingStats, World,
+    },
 };
 
 pub fn render_run(world: &World) -> String {
@@ -24,7 +28,7 @@ pub fn render_run_since(world: &World, first_event: usize) -> String {
         lines.push(render_event(world, event));
     }
 
-    lines.extend([String::new(), render_summary(world)]);
+    lines.extend([String::new(), Report::from_world(world).render_table()]);
     lines.join("\n")
 }
 
@@ -223,9 +227,12 @@ pub fn render_dashboard(world: &World) -> String {
         }
     }
 
-    lines.extend([String::new(), "RECENT EVENTS".into()]);
-    for event in world.events().iter().rev().take(8).rev() {
-        lines.push(render_event(world, event));
+    match render_last_day(world, false) {
+        Some(last_day) => lines.extend(last_day.lines().map(str::to_owned)),
+        None => {
+            lines.push(String::new());
+            lines.push("No events yet".into());
+        }
     }
     lines.join("\n")
 }
@@ -302,38 +309,6 @@ fn routing_counts(world: &World) -> (u64, u64, u64, u64) {
         llm,
         fallbacks,
     )
-}
-
-pub fn render_summary(world: &World) -> String {
-    let counts = event_counts(world);
-    let (local, attempts, llm, fallbacks) = routing_counts(world);
-    let (intentions, steps, completed, interrupted) = intention_counts(world);
-    [
-        "=== RUN SUMMARY ===".into(),
-        format!("Elapsed: {}", world.tick),
-        format!("Events: {}", world.events().len()),
-        format!("Moves: {}", counts.moves),
-        format!("Conversations: {}", counts.conversations),
-        format!("Confrontations: {}", counts.confrontations),
-        format!("Purchases: {}", counts.purchases),
-        format!("Aid given: {}", counts.aid),
-        format!("Items used: {}", counts.items_used),
-        format!("Rests: {}", counts.rests),
-        format!("Work: {}", counts.work),
-        format!("Goals completed: {}", counts.goals),
-        format!("Treatments: {}", counts.treatments),
-        format!("Deaths: {}", counts.deaths),
-        format!("Rejected actions: {}", counts.rejected),
-        format!("Local decisions: {local}"),
-        format!("LLM attempts: {attempts}"),
-        format!("LLM decisions: {llm}"),
-        format!("LLM fallbacks: {fallbacks}"),
-        format!("LLM intentions started: {intentions}"),
-        format!("Local intention steps: {steps}"),
-        format!("LLM intentions completed: {completed}"),
-        format!("LLM intentions interrupted: {interrupted}"),
-    ]
-    .join("\n")
 }
 
 pub fn render_event(world: &World, event: &Event) -> String {
@@ -588,14 +563,14 @@ mod tests {
         let rendered = render_run(&world);
         assert_eq!(rendered, render_run(&world));
         assert!(rendered.contains("Briar Glen\nSeed: 42\nAgents: 8"));
-        assert!(rendered.contains("=== RUN SUMMARY ==="));
-        assert!(rendered.contains("Items used:"));
+        assert!(rendered.contains("=== RUN ==="));
+        assert!(rendered.contains("Goals completed"));
         assert!(rendered.contains("used a meal"));
 
         let resumed = render_run_since(&world, 10);
         assert!(!resumed.contains("07:05  "));
         assert!(resumed.contains(&render_event(&world, &world.events()[10])));
-        assert!(resumed.contains(&format!("Events: {}", world.events().len())));
+        assert!(resumed.contains("=== RUN ==="));
 
         let dashboard = render_dashboard(&world);
         assert!(dashboard.contains("=== Briar Glen — Day 1"));
@@ -610,6 +585,8 @@ mod tests {
         assert!(dashboard.contains("Revenue"));
         assert!(dashboard.contains("Wages"));
         assert!(dashboard.contains(&world.agents.values().next().expect("resident").name));
-        assert!(dashboard.contains("RECENT EVENTS"));
+        assert!(dashboard.contains("=== Day 1 ==="));
+        assert!(dashboard.contains("Summary: deaths:"));
+        assert!(!dashboard.contains("RECENT EVENTS"));
     }
 }
