@@ -935,3 +935,47 @@ fn town_hall(world: &World) -> &Location {
         })
         .expect("town hall")
 }
+
+#[tokio::test]
+async fn sheriff_arrests_follow_witnessed_crimes_across_many_seeds() {
+    // 10 seeds x 30 days with the local engine: the sheriff must make at least
+    // one arrest; every arrest names the Sheriff as officer, the claim's subject
+    // as prisoner, and rests on a witnessed memory or credible rumor (>= 0.6).
+    use crate::{decision::LocalDecisionEngine, runner::run_simulation, sim::event_evidence};
+    let mut arrests = 0;
+    for seed in 0..10 {
+        let world = World::briar_glen(seed).expect("town");
+        let mut engine = LocalDecisionEngine::new(seed);
+        let world = run_simulation(world, 30 * Tick::PER_DAY, &mut engine)
+            .await
+            .expect("simulation");
+        for event in world.events() {
+            let EventKind::Arrested {
+                officer,
+                prisoner,
+                claim,
+                ..
+            } = &event.kind
+            else {
+                continue;
+            };
+            arrests += 1;
+            assert_eq!(
+                world.agents[officer].occupation,
+                Occupation::Sheriff,
+                "only the sheriff arrests"
+            );
+            let Some(claimed_event) = world.events().iter().find(|event| event.id == *claim) else {
+                panic!("arrest claim {claim} is not a stored event");
+            };
+            let Some((subject, ..)) = event_evidence(&claimed_event.kind) else {
+                panic!("arrest claim {claim} is not a crime event");
+            };
+            // Legality at arrest time is enforced by World::execute (NoLegalBasis);
+            // memories may have been evicted by run end, so only the durable facts
+            // (sheriff officer, claim subject) are asserted here.
+            assert_eq!(subject, *prisoner, "prisoner must be the claim's subject");
+        }
+    }
+    assert!(arrests >= 1, "expected at least one arrest across 10 seeds");
+}

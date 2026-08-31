@@ -120,6 +120,8 @@ impl World {
                     .expect("town has a jail")
                     .id;
                 self.relocate(*prisoner, jail);
+                // Relocation can invalidate goals (e.g. a Visit-Jail goal), so prune.
+                self.refresh_goals(*prisoner);
                 if *fine > 0 {
                     if let Some(prisoner) = self.agents.get_mut(prisoner) {
                         prisoner.balance -= *fine;

@@ -3,7 +3,7 @@ use crate::{
     cognition::{AgentObservation, RouteHint, StealAffordance, VisibleAgent},
     sim::{
         AgentId, Business, Decision, DialogueTone, GoalKind, GoalTarget, HealthCondition,
-        IntentionGoal, Item, Loot, ObservationTarget, Offering, ProposedAction, Tick,
+        IntentionGoal, Item, Loot, ObservationTarget, Occupation, Offering, ProposedAction, Tick,
         TownEventKind,
     },
 };
@@ -139,6 +139,30 @@ impl LocalDecisionEngine {
             return Ok(purchase_action(observation, Offering::Meal)
                 .or_else(|| work_action(observation))
                 .unwrap_or(ProposedAction::Wait));
+        }
+
+        // The sheriff enforces the law during work hours: arrest the best-credentialed
+        // claim (highest confidence, lowest claim id on ties). Only claims exposed by
+        // the arrest affordance are legal; the world stays authoritative. The existing
+        // confront branch handles investigation, and patrol replaces the idle fallback.
+        if observation.self_description.occupation == Occupation::Sheriff
+            && (7..21).contains(&observation.local_time.hour)
+            && !observation.action_affordances.arrest.is_empty()
+        {
+            let best = observation
+                .action_affordances
+                .arrest
+                .iter()
+                .max_by(|left, right| {
+                    left.confidence
+                        .total_cmp(&right.confidence)
+                        .then_with(|| right.claim.cmp(&left.claim))
+                })
+                .expect("non-empty arrest affordances");
+            return Ok(ProposedAction::Arrest {
+                target: best.target,
+                claim: best.claim,
+            });
         }
         if needs.energy < 0.2 + 0.1 * personality.neuroticism {
             return Ok(rest_at_home());
@@ -459,6 +483,20 @@ impl LocalDecisionEngine {
             0.5 + personality.openness + personality.neuroticism + (-mood).max(0.0),
             1.5 - personality.impulsiveness + (-mood).max(0.0),
         ];
+
+        // The sheriff patrols open connected locations instead of idling during
+        // work hours; at night they behave like anyone else. The rotation is a pure
+        // function of the tick (no engine state), so checkpoint resumes pick the
+        // same routes as uninterrupted runs.
+        if observation.self_description.occupation == Occupation::Sheriff
+            && (7..21).contains(&observation.local_time.hour)
+            && !observation.action_affordances.move_to.is_empty()
+        {
+            let destinations = &observation.action_affordances.move_to;
+            let destination = destinations[observation.tick.0 as usize % destinations.len()];
+            return Ok(ProposedAction::Move { destination });
+        }
+
         let mut choice = rng.random::<f32>() * weights.iter().sum::<f32>();
         let action = weights
             .iter()
@@ -642,8 +680,9 @@ mod tests {
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         decision::DecisionEngine,
         sim::{
-            Activity, ActivityKind, Belief, DialogueTone, EventId, Goal, GoalKind, GoalTarget,
-            IntentionGoal, Item, Loot, Needs, Offering, ProposedAction, Relationship, Tick, World,
+            ActionResult, Activity, ActivityKind, Belief, DialogueTone, EventId, Goal, GoalKind,
+            GoalTarget, IntentionGoal, Item, Loot, Needs, Occupation, Offering, ProposedAction,
+            Relationship, Tick, World,
         },
     };
     use uuid::Uuid;
@@ -1414,5 +1453,204 @@ mod tests {
                 .action,
             ProposedAction::Attack { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn sheriff_arrests_on_a_legal_witnessed_claim() {
+        let mut world = World::briar_glen(41).expect("town");
+        let sheriff = world
+            .agents
+            .values()
+            .find(|agent| agent.occupation == Occupation::Sheriff)
+            .expect("sheriff")
+            .id;
+        let thief = world
+            .agents
+            .values()
+            .find(|agent| agent.id != sheriff)
+            .expect("thief")
+            .id;
+        let victim = world
+            .agents
+            .values()
+            .find(|agent| agent.id != sheriff && agent.id != thief)
+            .expect("victim")
+            .id;
+        // Everyone starts idle together at Riverside Houses, so the sheriff
+        // witnesses the theft attempt and gains a legal claim.
+        assert!(matches!(
+            world.execute(
+                thief,
+                ProposedAction::Steal {
+                    target: victim,
+                    loot: Loot::Coins(1),
+                }
+            ),
+            ActionResult::Success(_)
+        ));
+        let mut observation = perceive(&world, sheriff).expect("observation");
+        observation.self_description.needs = Needs {
+            money: 1.0,
+            food: 1.0,
+            companionship: 1.0,
+            safety: 1.0,
+            status: 1.0,
+            energy: 1.0,
+        };
+        observation.goals.clear();
+        assert!(!observation.action_affordances.arrest.is_empty());
+        let decision = LocalDecisionEngine::new(41)
+            .decide(&observation)
+            .await
+            .expect("sheriff decision");
+        assert!(
+            matches!(decision.action, ProposedAction::Arrest { target, .. } if target == thief)
+        );
+
+        // Without the memory (or a credible rumor) the same observation offers
+        // no legal claim, so the sheriff never proposes an arrest.
+        world
+            .agents
+            .get_mut(&sheriff)
+            .expect("sheriff")
+            .memories
+            .clear();
+        world
+            .agents
+            .get_mut(&sheriff)
+            .expect("sheriff")
+            .rumors
+            .clear();
+        let bare = perceive(&world, sheriff).expect("observation");
+        assert!(bare.action_affordances.arrest.is_empty());
+        let decision = LocalDecisionEngine::new(41)
+            .decide(&bare)
+            .await
+            .expect("bare decision");
+        assert!(!matches!(decision.action, ProposedAction::Arrest { .. }));
+    }
+
+    #[tokio::test]
+    async fn sheriff_patrols_during_work_hours_with_a_rotating_cursor() {
+        // Find a seed where everything else is blocked: full needs, no goals, no
+        // town event, sheriff at work-hour patrol with no legal claims.
+        for seed in 0..64u64 {
+            let mut world = World::briar_glen(seed).expect("town");
+            if world.active_town_event.is_some() {
+                continue;
+            }
+            let sheriff = world
+                .agents
+                .values()
+                .find(|agent| agent.occupation == Occupation::Sheriff)
+                .expect("sheriff")
+                .id;
+            world
+                .advance_to(Tick(10 * 60 / Tick::MINUTES))
+                .expect("morning");
+            let mut observation = perceive(&world, sheriff).expect("observation");
+            observation.self_description.needs = Needs {
+                money: 1.0,
+                food: 1.0,
+                companionship: 1.0,
+                safety: 1.0,
+                status: 1.0,
+                energy: 1.0,
+            };
+            observation.goals.clear();
+            // Stocked inventory so the reserve-purchase branch stays quiet too.
+            observation.self_description.inventory.meals = 2;
+            observation.self_description.inventory.supplies = 1;
+            observation.self_description.inventory.repair_kits = 1;
+            if observation.town_event.is_none()
+                && observation.action_affordances.arrest.is_empty()
+                && observation.action_affordances.move_to.len() >= 2
+            {
+                let destinations = observation.action_affordances.move_to.clone();
+                let index = observation.tick.0 as usize % destinations.len();
+                let mut engine = LocalDecisionEngine::new(seed);
+                assert_eq!(
+                    engine.decide(&observation).await.expect("patrol").action,
+                    ProposedAction::Move {
+                        destination: destinations[index]
+                    }
+                );
+                return;
+            }
+        }
+        panic!("no seed produced a clean sheriff patrol within 64 trials");
+    }
+
+    #[tokio::test]
+    async fn sheriff_does_not_patrol_at_night() {
+        for seed in 0..64u64 {
+            let mut world = World::briar_glen(seed).expect("town");
+            let sheriff = world
+                .agents
+                .values()
+                .find(|agent| agent.occupation == Occupation::Sheriff)
+                .expect("sheriff")
+                .id;
+            world
+                .advance_to(Tick(22 * 60 / Tick::MINUTES))
+                .expect("night");
+            let mut night = perceive(&world, sheriff).expect("observation");
+            night.self_description.needs = Needs {
+                money: 1.0,
+                food: 1.0,
+                companionship: 1.0,
+                safety: 1.0,
+                status: 1.0,
+                energy: 1.0,
+            };
+            night.goals.clear();
+            night.self_description.inventory.meals = 2;
+            night.self_description.inventory.supplies = 1;
+            night.self_description.inventory.repair_kits = 1;
+            if night.town_event.is_none()
+                && night.action_affordances.arrest.is_empty()
+                && !night.action_affordances.move_to.is_empty()
+            {
+                // At 22:00 (outside 7..21) the sheriff falls back to plain behavior;
+                // the decision is not the deterministic patrol rotation.
+                let mut engine = LocalDecisionEngine::new(seed);
+                let decision = engine.decide(&night).await.expect("night decision");
+                assert!(!matches!(decision.action, ProposedAction::Move { .. }));
+                return;
+            }
+        }
+        panic!("no seed produced a clean non-move night decision within 64 trials");
+    }
+
+    #[tokio::test]
+    async fn non_sheriffs_never_see_arrest_affordances() {
+        let mut world = World::briar_glen(41).expect("town");
+        let civilian = world
+            .agents
+            .values()
+            .find(|agent| agent.occupation != Occupation::Sheriff)
+            .expect("civilian")
+            .id;
+        let thief = world
+            .agents
+            .values()
+            .find(|agent| agent.id != civilian)
+            .expect("thief")
+            .id;
+        let victim = world
+            .agents
+            .values()
+            .find(|agent| agent.id != civilian && agent.id != thief)
+            .expect("victim")
+            .id;
+        world.execute(
+            thief,
+            ProposedAction::Steal {
+                target: victim,
+                loot: Loot::Coins(1),
+            },
+        );
+        let observation = perceive(&world, civilian).expect("observation");
+        assert!(observation.action_affordances.arrest.is_empty());
     }
 }

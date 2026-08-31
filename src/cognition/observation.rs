@@ -59,7 +59,15 @@ pub struct StealAffordance {
     pub loot: Loot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArrestAffordance {
+    pub target: AgentId,
+    pub claim: EventId,
+    /// Claim confidence: rumor confidence, or 1.0 for a directly witnessed event.
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionAffordances {
     pub move_to: Vec<LocationId>,
     pub talk_to: Vec<AgentId>,
@@ -72,6 +80,7 @@ pub struct ActionAffordances {
     pub give: Vec<AidAffordance>,
     pub steal_from: Vec<StealAffordance>,
     pub attack: Vec<AgentId>,
+    pub arrest: Vec<ArrestAffordance>,
     pub can_seek_treatment: bool,
     pub can_rest: bool,
     pub can_work: bool,
@@ -311,6 +320,40 @@ pub fn perceive(world: &World, observer: AgentId) -> Result<AgentObservation, Ob
             })
             .collect(),
         attack: visible_agents.iter().map(|agent| agent.id).collect(),
+        arrest: if agent.occupation == Occupation::Sheriff {
+            // Legal claims only: a crime event whose subject is present (co-located,
+            // alive) that the sheriff witnessed or learned via a rumor >= 0.6.
+            // Mirrors the Arrest validation in World::execute; no other basis exists.
+            let mut options = Vec::new();
+            for visible in &visible_agents {
+                for event in world.events() {
+                    // ponytail: linear scan of the event log per candidate; fine at
+                    // current scales, index by subject if towns run far longer.
+                    if !matches!(
+                        event_evidence(&event.kind),
+                        Some((subject, ..)) if subject == visible.id
+                    ) || !agent.has_legal_basis(event.id)
+                    {
+                        continue;
+                    }
+                    let confidence = agent
+                        .rumors
+                        .iter()
+                        .filter(|rumor| rumor.event.id == event.id)
+                        .map(|rumor| rumor.confidence)
+                        .max_by(|left, right| left.total_cmp(right))
+                        .unwrap_or(1.0);
+                    options.push(ArrestAffordance {
+                        target: visible.id,
+                        claim: event.id,
+                        confidence,
+                    });
+                }
+            }
+            options
+        } else {
+            Vec::new()
+        },
         can_seek_treatment: location.business.is_some_and(|business| {
             business.offering == Offering::Medicine
                 && world.is_location_open(location.id)
