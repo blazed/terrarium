@@ -82,10 +82,18 @@ impl Business {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationKind {
+    Home,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
     pub id: LocationId,
     pub name: String,
+    pub kind: LocationKind,
     pub business: Option<Business>,
     pub opening_hours: Option<OpeningHours>,
     pub connected: BTreeSet<LocationId>,

@@ -99,7 +99,9 @@ impl World {
             .keys()
             .copied()
             .filter(|destination| {
-                !visited.contains(destination) && self.is_location_open(*destination)
+                !visited.contains(destination)
+                    && self.is_location_open(*destination)
+                    && self.locations[destination].kind != LocationKind::Home
             })
             .collect::<Vec<_>>();
         if !destinations.is_empty() {
@@ -206,7 +208,11 @@ impl World {
                 *resident != actor && self.agents.get(resident).is_some_and(Agent::is_alive)
             }
             GoalTarget::Visit { destination } => {
-                *destination != agent.location && self.locations.contains_key(destination)
+                *destination != agent.location
+                    && self
+                        .locations
+                        .get(destination)
+                        .is_some_and(|location| location.kind != LocationKind::Home)
             }
             GoalTarget::Purchase { location } => self
                 .locations

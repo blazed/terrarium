@@ -27,6 +27,9 @@ fn success_world() -> (World, AgentId, AgentId, AgentId) {
             let thief_state = world.agents.get_mut(&thief).expect("thief");
             thief_state.personality.honesty = 0.0;
             thief_state.personality.impulsiveness = 0.0;
+            let meeting = world.agents[&thief].home;
+            world.relocate(victim, meeting);
+            world.relocate(idle_witness, meeting);
             return (world, thief, victim, idle_witness);
         }
     }
@@ -47,6 +50,10 @@ fn failure_world() -> (World, AgentId, AgentId) {
             let victim_state = world.agents.get_mut(&victim).expect("victim");
             victim_state.personality.honesty = 1.0;
             victim_state.personality.impulsiveness = 1.0;
+            let meeting = world.agents[&thief].home;
+            for id in &residents {
+                world.relocate(*id, meeting);
+            }
             return (world, thief, victim);
         }
     }
@@ -346,6 +353,7 @@ fn assault_injures_victim_and_drops_their_relationship() {
         .expect("attacker")
         .personality
         .agreeableness = 1.0;
+    world.relocate(victim, world.agents[&attacker].location);
     let health_before = world.agents[&victim].health;
     let safety_before = world.agents[&victim].needs.safety;
     let attacker_mood_before = world.agents[&attacker].mood;
@@ -385,6 +393,7 @@ fn unremorseful_attacker_keeps_mood() {
         .expect("attacker")
         .personality
         .agreeableness = 0.0;
+    world.relocate(victim, world.agents[&attacker].location);
     let mood_before = world.agents[&attacker].mood;
     world.execute(attacker, ProposedAction::Attack { target: victim });
     assert_eq!(world.agents[&attacker].mood, mood_before);
@@ -397,6 +406,10 @@ fn assault_witnesses_learn_hostility_about_the_attacker() {
     let attacker = residents[0];
     let victim = residents[1];
     let witness = residents[3];
+
+    let meeting = world.agents[&attacker].location;
+    world.relocate(victim, meeting);
+    world.relocate(witness, meeting);
 
     world.execute(attacker, ProposedAction::Attack { target: victim });
 

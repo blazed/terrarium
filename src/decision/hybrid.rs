@@ -158,8 +158,14 @@ mod tests {
     }
 
     fn observation() -> crate::cognition::AgentObservation {
-        let world = World::from_spec(BRIAR_GLEN, 1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companion = *world
+            .agents
+            .keys()
+            .find(|id| **id != actor)
+            .expect("companion");
+        world.relocate(companion, world.agents[&actor].location);
         perceive(&world, actor).expect("observation")
     }
 

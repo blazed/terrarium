@@ -7,6 +7,7 @@ fn confrontations_confirm_deny_and_reject_invalid_claims() {
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let target = residents[0];
         let accuser = residents[2];
+        world.relocate(accuser, world.agents[&target].location);
         world
             .agents
             .get_mut(&target)
@@ -78,6 +79,7 @@ fn confrontations_confirm_deny_and_reject_invalid_claims() {
         .copied()
         .find(|id| *id != accuser && *id != target)
         .expect("third resident");
+    world.relocate(wrong_target, world.agents[&accuser].location);
     assert!(matches!(
         world.execute(
             accuser,
@@ -106,6 +108,7 @@ fn conversations_build_bounded_mutual_relationships() {
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
+    world.relocate(listener, world.agents[&speaker].location);
     assert!(!world.agents[&speaker].relationships.contains_key(&listener));
     assert!(!world.agents[&listener].relationships.contains_key(&speaker));
 
@@ -138,6 +141,7 @@ fn agreeable_honest_speakers_build_relationships_faster() {
     let residents = warm.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
+    warm.relocate(listener, warm.agents[&speaker].location);
     let mut cold = warm.clone();
     warm.agents
         .get_mut(&speaker)
@@ -177,10 +181,11 @@ fn agreeable_honest_speakers_build_relationships_faster() {
 
 #[test]
 fn dialogue_tone_changes_relationship_effects() {
-    let neutral = World::from_spec(BRIAR_GLEN, 42).expect("town");
+    let mut neutral = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let residents = neutral.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
+    neutral.relocate(listener, neutral.agents[&speaker].location);
     let mut friendly = neutral.clone();
     let mut supportive = neutral.clone();
     let mut tense = neutral;
@@ -217,6 +222,7 @@ fn dialogue_is_trimmed_and_bounded_to_one_printable_line() {
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let actor = residents[0];
     let listener = residents[1];
+    world.relocate(listener, world.agents[&actor].location);
 
     for (message, rejection) in [
         ("   ".into(), ActionRejection::EmptyMessage),

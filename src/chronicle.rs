@@ -150,6 +150,10 @@ mod tests {
             .id;
         let thief = residents[0];
         let victim = residents[1];
+        let meeting = world.agents[&thief].location;
+        for id in &residents {
+            world.relocate(*id, meeting);
+        }
         // A theft attempt is witnessed by everyone present, the sheriff included.
         world.execute(
             thief,

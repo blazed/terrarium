@@ -803,6 +803,15 @@ mod tests {
     #[test]
     fn observation_contains_only_local_agents() {
         let mut world = World::from_spec(BRIAR_GLEN, 9).expect("town");
+        let hub = world
+            .locations
+            .values()
+            .find(|location| location.name == "Riverside Houses")
+            .map(|location| location.id)
+            .expect("hub");
+        for id in world.agents.keys().copied().collect::<Vec<_>>() {
+            world.relocate(id, hub);
+        }
         let hidden = *world.agents.keys().next().expect("resident");
         let from = world.agents[&hidden].location;
         let destination = *world.locations[&from]
@@ -922,6 +931,7 @@ mod tests {
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let observer = residents[0];
         let visible = residents[1];
+        world.relocate(visible, world.agents[&observer].location);
         let activity = Activity {
             kind: ActivityKind::Working,
             until: Tick(world.tick.0 + 12),
@@ -977,6 +987,9 @@ mod tests {
         let speaker = residents[0];
         let listener = residents[1];
         let witness = residents[2];
+        let meeting = world.agents[&speaker].location;
+        world.relocate(listener, meeting);
+        world.relocate(witness, meeting);
         assert!(matches!(
             world.execute(
                 speaker,
@@ -1263,6 +1276,9 @@ mod tests {
         let observer = residents[0];
         let target = residents[2];
         let stranger = residents[3];
+        let meeting = world.agents[&observer].location;
+        world.relocate(target, meeting);
+        world.relocate(stranger, meeting);
         world
             .agents
             .get_mut(&observer)
@@ -1346,6 +1362,8 @@ mod tests {
         let speaker = residents[1];
         let listener = residents[2];
         let home = world.agents[&hidden].location;
+        world.relocate(speaker, home);
+        world.relocate(listener, home);
         let destination = *world.locations[&home]
             .connected
             .iter()
@@ -1390,6 +1408,7 @@ mod tests {
         let observer = residents[0];
         let source = residents[1];
         let outsider = residents[2];
+        world.relocate(source, world.agents[&observer].location);
         let mut event = match world.execute(source, ProposedAction::Wait) {
             ActionResult::Success(events) => events[0].clone(),
             ActionResult::Rejected(reason) => panic!("wait rejected: {reason:?}"),
@@ -1456,6 +1475,12 @@ mod tests {
     fn observations_expose_only_visible_health_conditions() {
         let mut world = World::from_spec(BRIAR_GLEN, 13).expect("town");
         let observer = *world.agents.keys().next().expect("resident");
+        let companion = *world
+            .agents
+            .keys()
+            .find(|id| **id != observer)
+            .expect("companion");
+        world.relocate(companion, world.agents[&observer].location);
         let location = world.agents[&observer].location;
         let visible = world.locations[&location]
             .agents

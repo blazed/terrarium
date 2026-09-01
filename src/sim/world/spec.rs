@@ -25,13 +25,6 @@ struct LocationSpec {
     opening_hours: Option<OpeningHours>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum LocationKind {
-    Home,
-    Other,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BusinessSpec {
@@ -288,6 +281,7 @@ fn build_world(spec: &TownSpec, seed: u64) -> World {
                 Location {
                     id,
                     name: location.name.clone(),
+                    kind: location.kind,
                     business: location.business.as_ref().map(|business| Business {
                         offering: business.offering,
                         price: business.price,

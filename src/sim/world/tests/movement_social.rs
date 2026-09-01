@@ -10,6 +10,12 @@ fn work_and_activity_locations_are_authoritative() {
         .map(|agent| &agent.id)
         .expect("worker");
     let workplace = world.agents[&actor].workplace.expect("workplace");
+    let staging = *world.locations[&workplace]
+        .connected
+        .iter()
+        .next()
+        .expect("connected staging location");
+    world.relocate(actor, staging);
     world.advance_to(Tick(8 * 12)).expect("morning");
     assert!(matches!(
         world.execute(
@@ -44,6 +50,24 @@ fn work_and_activity_locations_are_authoritative() {
 }
 
 #[test]
+fn rest_requires_the_agents_own_home() {
+    let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
+    let residents = world.agents.keys().copied().collect::<Vec<_>>();
+    let actor = residents[0];
+    let other_home = world.agents[&residents[1]].home;
+    world.relocate(actor, other_home);
+    assert_eq!(
+        world.execute(actor, ProposedAction::Rest),
+        ActionResult::Rejected(ActionRejection::CannotRestHere(other_home))
+    );
+    world.relocate(actor, world.agents[&actor].home);
+    assert!(matches!(
+        world.execute(actor, ProposedAction::Rest),
+        ActionResult::Success(_)
+    ));
+}
+
+#[test]
 fn town_identity_is_seeded() {
     assert_eq!(
         World::from_spec(BRIAR_GLEN, 7).expect("town").agents,
@@ -67,7 +91,13 @@ fn town_identity_is_seeded() {
 fn closed_locations_reject_entry_and_activity_but_allow_departure() {
     let mut world = World::from_spec(BRIAR_GLEN, 5).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
-    let home = world.agents[&actor].home;
+    let hub = world
+        .locations
+        .values()
+        .find(|location| location.name == "Riverside Houses")
+        .map(|location| location.id)
+        .expect("hub");
+    world.relocate(actor, hub);
     let tavern = world
         .locations
         .values()
@@ -101,7 +131,7 @@ fn closed_locations_reject_entry_and_activity_but_allow_departure() {
         ActionResult::Rejected(ActionRejection::LocationClosed(tavern))
     );
     assert!(matches!(
-        world.execute(actor, ProposedAction::Move { destination: home }),
+        world.execute(actor, ProposedAction::Move { destination: hub },),
         ActionResult::Success(_)
     ));
 }
@@ -138,6 +168,9 @@ fn only_present_agents_remember_a_conversation() {
     let speaker = residents[1];
     let listener = residents[2];
     let home = world.agents[&remote].location;
+    for id in [speaker, listener, residents[3]] {
+        world.relocate(id, home);
+    }
     let destination = *world.locations[&home]
         .connected
         .iter()
@@ -211,6 +244,9 @@ fn conversations_propagate_bounded_degrading_rumors() {
     let subject = residents[0];
     let first_listener = residents[2];
     let second_listener = residents[3];
+    let meeting = world.agents[&subject].location;
+    world.relocate(first_listener, meeting);
+    world.relocate(second_listener, meeting);
     let fact = world.append_event(
         None,
         EventKind::Worked {

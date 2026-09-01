@@ -725,6 +725,12 @@ mod tests {
             .advance_to(Tick(9 * 60 / Tick::MINUTES))
             .expect("festival");
         let actor = *festival.agents.keys().next().expect("resident");
+        let companion = *festival
+            .agents
+            .keys()
+            .find(|id| **id != actor)
+            .expect("companion");
+        festival.relocate(companion, festival.agents[&actor].location);
         let mut observation = perceive(&festival, actor).expect("observation");
         observation.self_description.needs = crate::sim::Needs {
             money: 1.0,
@@ -923,8 +929,14 @@ mod tests {
 
     #[tokio::test]
     async fn confident_beliefs_shape_companion_and_tone() {
-        let world = World::from_spec(BRIAR_GLEN, 17).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 17).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companion = *world
+            .agents
+            .keys()
+            .find(|id| **id != actor)
+            .expect("companion");
+        world.relocate(companion, world.agents[&actor].location);
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.needs.food = 0.5;
         observation.self_description.needs.energy = 0.5;
@@ -976,8 +988,14 @@ mod tests {
 
     #[tokio::test]
     async fn credible_rumors_trigger_confrontations() {
-        let world = World::from_spec(BRIAR_GLEN, 18).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 18).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companion = *world
+            .agents
+            .keys()
+            .find(|id| **id != actor)
+            .expect("companion");
+        world.relocate(companion, world.agents[&actor].location);
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.needs.food = 0.5;
         observation.self_description.needs.energy = 0.5;
@@ -1099,6 +1117,16 @@ mod tests {
     async fn urgent_needs_and_time_drive_routines() {
         let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companions = world
+            .agents
+            .keys()
+            .copied()
+            .filter(|id| *id != actor)
+            .take(2)
+            .collect::<Vec<_>>();
+        for companion in companions {
+            world.relocate(companion, world.agents[&actor].location);
+        }
         let mut engine = LocalDecisionEngine::new(7);
 
         let hungry = perceive(&world, actor).expect("observation");
@@ -1172,6 +1200,13 @@ mod tests {
             }
         );
 
+        let hub = world
+            .locations
+            .values()
+            .find(|location| location.name == "Riverside Houses")
+            .map(|location| location.id)
+            .expect("hub");
+        world.relocate(actor, hub);
         world.execute(
             actor,
             ProposedAction::Move {
@@ -1340,8 +1375,18 @@ mod tests {
 
     #[tokio::test]
     async fn low_honesty_broke_resident_steals_and_prefers_occupied_targets() {
-        let world = World::from_spec(BRIAR_GLEN, 41).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 41).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companions = world
+            .agents
+            .keys()
+            .copied()
+            .filter(|id| *id != actor)
+            .take(2)
+            .collect::<Vec<_>>();
+        for companion in companions {
+            world.relocate(companion, world.agents[&actor].location);
+        }
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.personality.honesty = 0.3;
         observation.self_description.personality.impulsiveness = 0.8;
@@ -1386,8 +1431,14 @@ mod tests {
 
     #[tokio::test]
     async fn high_honesty_resident_never_steals() {
-        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
+        let companion = *world
+            .agents
+            .keys()
+            .find(|id| **id != actor)
+            .expect("companion");
+        world.relocate(companion, world.agents[&actor].location);
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.personality.honesty = 1.0;
         observation.self_description.personality.impulsiveness = 0.8;
@@ -1420,6 +1471,16 @@ mod tests {
             .advance_to(Tick(9 * 60 / Tick::MINUTES))
             .expect("morning");
         let actor = *world.agents.keys().next().expect("resident");
+        let companions = world
+            .agents
+            .keys()
+            .copied()
+            .filter(|id| *id != actor)
+            .take(2)
+            .collect::<Vec<_>>();
+        for companion in companions {
+            world.relocate(companion, world.agents[&actor].location);
+        }
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.personality.agreeableness = 0.2;
         observation.self_description.mood = -0.4;
@@ -1484,6 +1545,9 @@ mod tests {
             .find(|agent| agent.id != sheriff && agent.id != thief)
             .expect("victim")
             .id;
+        let meeting = world.agents[&sheriff].location;
+        world.relocate(thief, meeting);
+        world.relocate(victim, meeting);
         // Everyone starts idle together at Riverside Houses, so the sheriff
         // witnesses the theft attempt and gains a legal claim.
         assert!(matches!(
@@ -1556,6 +1620,13 @@ mod tests {
             world
                 .advance_to(Tick(10 * 60 / Tick::MINUTES))
                 .expect("morning");
+            let hub = world
+                .locations
+                .values()
+                .find(|location| location.name == "Riverside Houses")
+                .map(|location| location.id)
+                .expect("hub");
+            world.relocate(sheriff, hub);
             let mut observation = perceive(&world, sheriff).expect("observation");
             observation.self_description.needs = Needs {
                 money: 1.0,
@@ -1669,6 +1740,9 @@ mod tests {
         let actor = residents[0];
         let thief = residents[1];
         let neutral = residents[2];
+        let meeting = world.agents[&actor].location;
+        world.relocate(thief, meeting);
+        world.relocate(neutral, meeting);
         // The thief is the better-liked friend on paper; the confident hostile
         // belief must make them impossible to choose regardless of score. Only the
         // thief and the neutral resident are needy / visible, so the choice is

@@ -6,7 +6,7 @@ impl World {
             .active_town_event
             .is_some_and(|event| event.kind == TownEventKind::Storm)
         {
-            self.agents.values().any(|agent| agent.home == location)
+            self.locations[&location].kind == LocationKind::Home
         } else {
             self.locations[&location].is_open(self.tick.hour())
         }

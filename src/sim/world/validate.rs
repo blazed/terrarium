@@ -186,6 +186,11 @@ impl World {
                     "location {id} has invalid opening hours"
                 )));
             }
+            if location.kind == LocationKind::Home && location.opening_hours.is_some() {
+                return Err(WorldError::InvalidState(format!(
+                    "home location {id} has opening hours"
+                )));
+            }
             for connected in &location.connected {
                 let other = self
                     .locations
@@ -230,6 +235,11 @@ impl World {
             }
             if !self.locations.contains_key(&agent.home) {
                 return Err(WorldError::UnknownLocation(agent.home));
+            }
+            if self.locations[&agent.home].kind != LocationKind::Home {
+                return Err(WorldError::InvalidState(format!(
+                    "agent {id} is assigned to a non-Home location"
+                )));
             }
             if agent.workplace.is_some_and(|workplace| {
                 self.locations
