@@ -18,7 +18,7 @@ pub use agent::{
     Personality, RoutingStats, Rumor,
 };
 pub use event::{ConfrontationOutcome, Event, EventKind};
-pub use location::{Business, Location, Offering, OpeningHours};
+pub use location::{Business, Location, LocationKind, Offering, OpeningHours};
 pub use relationship::Relationship;
 pub use scheduler::Scheduler;
 pub use town_event::{TOWN_EVENT_DURATION, TownEvent, TownEventKind};

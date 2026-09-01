@@ -7,8 +7,8 @@ use super::{
     Tick, TownEvent, TownEventKind, World, WorldError,
 };
 use crate::sim::{
-    ActivityKind, BRIAR_GLEN, BUSINESS_STARTING_CASH, Location, MAX_ITEMS_PER_KIND,
-    STOCK_PER_SHIFT, Scheduler, WORK_WAGE,
+    ActivityKind, BRIAR_GLEN, BUSINESS_STARTING_CASH, Location, LocationKind, MAX_ITEMS_PER_KIND,
+    OpeningHours, STOCK_PER_SHIFT, Scheduler, WORK_WAGE,
 };
 use std::collections::BTreeSet;
 use uuid::Uuid;

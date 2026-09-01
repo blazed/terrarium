@@ -301,6 +301,9 @@ fn contextual_goals_match_exact_targets_and_refresh() {
     let actor = residents[0];
     let listener = residents[1];
     let other = residents[2];
+    let meeting = world.agents[&actor].location;
+    world.relocate(listener, meeting);
+    world.relocate(other, meeting);
     let expires_at = Tick(world.tick.0 + Tick::PER_DAY);
     world.agents.get_mut(&actor).expect("actor").goals = vec![Goal::new(
         "Speak twice with the intended resident",
@@ -373,6 +376,33 @@ fn contextual_goals_match_exact_targets_and_refresh() {
 }
 
 #[test]
+fn home_kinds_are_excluded_from_exploration_and_visit_goals() {
+    let mut world = World::from_spec(BRIAR_GLEN, 0).expect("town");
+    let actor = *world.agents.keys().next().expect("resident");
+    let home = world.agents[&actor].home;
+
+    // A persisted Visit goal targeting a Home-kind location fails validation.
+    world.agents.get_mut(&actor).expect("actor").goals = vec![Goal::new(
+        "Visit a home",
+        GoalKind::Exploration,
+        GoalTarget::Visit { destination: home },
+        1,
+        Tick(world.tick.0 + 10),
+    )];
+    assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+
+    // Goal refresh drops Home-kind destinations and never re-adds one.
+    world.refresh_goals(actor);
+    assert!(world.agents[&actor].goals.iter().all(|goal| {
+        !matches!(
+            goal.target,
+            GoalTarget::Visit { destination }
+                if world.locations[&destination].kind == LocationKind::Home
+        )
+    }));
+}
+
+#[test]
 fn multi_hop_intentions_continue_and_clear() {
     let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
     world.advance_to(Tick(12 * 12)).expect("noon");
@@ -416,7 +446,7 @@ fn multi_hop_intentions_continue_and_clear() {
             .iter()
             .filter(|event| matches!(event.kind, EventKind::Moved { agent, .. } if agent == actor))
             .count(),
-        2
+        3
     );
     world.validate().expect("valid completed intention");
 }

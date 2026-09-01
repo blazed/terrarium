@@ -118,6 +118,13 @@ fn briar_fever_is_deterministic_and_infection_is_hidden_from_memories() {
             .all(|event| !matches!(event.kind, EventKind::DiseaseInfected { .. }))
     }));
 
+    let meeting = world.agents[&patient_zero].location;
+    for id in world.agents.keys().copied().collect::<Vec<_>>() {
+        if id != patient_zero {
+            world.relocate(id, meeting);
+        }
+    }
+
     world
         .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS))
         .expect("symptoms");

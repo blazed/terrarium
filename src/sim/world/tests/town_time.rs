@@ -4,7 +4,7 @@ use super::*;
 fn briar_glen_has_consistent_residents() {
     let world = World::from_spec(BRIAR_GLEN, 814_921).expect("town should construct");
     assert_eq!(world.agents.len(), 8);
-    assert_eq!(world.locations.len(), 10);
+    assert_eq!(world.locations.len(), 18);
     assert_eq!(
         world
             .locations
@@ -13,7 +13,36 @@ fn briar_glen_has_consistent_residents() {
             .sum::<usize>(),
         8
     );
+    let homes = world
+        .agents
+        .values()
+        .map(|agent| agent.home)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(homes.len(), 8);
+    let riverside = world
+        .locations
+        .values()
+        .find(|location| location.name == "Riverside Houses")
+        .expect("shared hub");
+    assert_eq!(riverside.kind, LocationKind::Home);
+    assert!(!homes.contains(&riverside.id));
     world.validate().expect("town should be valid");
+}
+
+#[test]
+fn runtime_home_invariants_are_enforced() {
+    let mut world = World::from_spec(BRIAR_GLEN, 0).expect("town");
+    let home = world.agents.values().next().expect("resident").home;
+    world.locations.get_mut(&home).expect("home").kind = LocationKind::Other;
+    assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
+
+    let mut world = World::from_spec(BRIAR_GLEN, 0).expect("town");
+    let home = world.agents.values().next().expect("resident").home;
+    world.locations.get_mut(&home).expect("home").opening_hours = Some(OpeningHours {
+        opens_at_hour: 8,
+        closes_at_hour: 18,
+    });
+    assert!(matches!(world.validate(), Err(WorldError::InvalidState(_))));
 }
 
 #[test]
@@ -61,6 +90,48 @@ fn town_events_start_end_and_change_conditions() {
         ends_at: Tick(storm.tick.0 + 1),
     });
     assert!(matches!(storm.validate(), Err(WorldError::InvalidState(_))));
+}
+
+#[test]
+fn storms_keep_all_homes_open_and_route_home_through_the_hub() {
+    let mut storm = World::from_spec(BRIAR_GLEN, 0).expect("town");
+    storm
+        .advance_to(Tick(8 * 60 / Tick::MINUTES))
+        .expect("storm");
+
+    // Every Home-kind location stays open during a storm; every other location
+    // closes, including the unassigned Riverside Houses hub.
+    for location in storm.locations.values() {
+        assert_eq!(
+            storm.is_location_open(location.id),
+            location.kind == LocationKind::Home,
+            "{} open state",
+            location.name
+        );
+    }
+
+    // An away resident routes home through the hub: leaf homes connect only to
+    // Riverside Houses, so the first step from a non-home is always the hub.
+    let actor = *storm.agents.keys().next().expect("resident");
+    let home = storm.agents[&actor].home;
+    let hub = storm
+        .locations
+        .values()
+        .find(|location| location.name == "Riverside Houses")
+        .map(|location| location.id)
+        .expect("hub");
+    let tavern = storm
+        .locations
+        .values()
+        .find(|location| location.name == "The Crooked Lantern")
+        .map(|location| location.id)
+        .expect("tavern");
+    storm.relocate(actor, tavern);
+    let (next, first_step, _) = storm
+        .shortest_open_route(tavern, &BTreeSet::from([home]))
+        .expect("route home");
+    assert_eq!(next, home);
+    assert_eq!(first_step, hub);
 }
 
 #[test]
