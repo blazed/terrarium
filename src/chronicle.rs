@@ -118,11 +118,11 @@ fn relationship_significance(event: &Event) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::render_chronicle;
-    use crate::sim::{EventKind, Loot, Occupation, ProposedAction, Tick, World};
+    use crate::sim::{BRIAR_GLEN, EventKind, Loot, Occupation, ProposedAction, Tick, World};
 
     #[test]
     fn chronicle_groups_days_summarizes_and_filters_routine_events() {
-        let mut world = World::briar_glen(413).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 413).expect("town");
         let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
         world.execute(residents[0], ProposedAction::Wait);
         world.tick = Tick(world.tick.0 + Tick::PER_DAY);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn chronicle_shows_thefts_and_arrests() {
-        let mut world = World::briar_glen(415).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 415).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let sheriff = world
             .agents

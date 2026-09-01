@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn event_log_keeps_insertion_order() {
-    let mut world = World::briar_glen(8).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 8).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let start = world.tick.0;
     world.advance_tick().expect("tick");
@@ -23,7 +23,7 @@ fn event_log_keeps_insertion_order() {
 
 #[test]
 fn unknown_actor_is_rejected_without_panicking() {
-    let mut world = World::briar_glen(7).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
     let unknown = AgentId(Uuid::nil());
     assert_eq!(
         world.execute(unknown, ProposedAction::Wait),
@@ -33,7 +33,7 @@ fn unknown_actor_is_rejected_without_panicking() {
 
 #[test]
 fn critical_needs_damage_health_and_repair_recovers_injury() {
-    let mut world = World::briar_glen(19).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 19).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let agent = world.agents.get_mut(&actor).expect("resident");
     agent.health = 0.5;
@@ -51,7 +51,7 @@ fn critical_needs_damage_health_and_repair_recovers_injury() {
 
 #[test]
 fn health_zero_emits_one_death_and_removes_membership() {
-    let mut world = World::briar_glen(20).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 20).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let other = *world.agents.keys().find(|id| **id != actor).expect("other");
     let location = world.agents[&actor].location;
@@ -92,7 +92,7 @@ fn health_zero_emits_one_death_and_removes_membership() {
 
 #[test]
 fn briar_fever_is_deterministic_and_infection_is_hidden_from_memories() {
-    let mut world = World::briar_glen(1).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
     world
         .advance_to(Tick(PATIENT_ZERO_TICK))
         .expect("patient zero");
@@ -140,7 +140,7 @@ fn briar_fever_is_deterministic_and_infection_is_hidden_from_memories() {
 
 #[test]
 fn briar_fever_recovers_and_immunity_expires() {
-    let mut world = World::briar_glen(1).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
     world
         .advance_to(Tick(PATIENT_ZERO_TICK + INCUBATION_TICKS))
         .expect("symptoms");
@@ -194,7 +194,7 @@ fn briar_fever_recovers_and_immunity_expires() {
 
 #[test]
 fn briar_fever_only_spreads_between_co_located_residents() {
-    let mut world = World::briar_glen(1).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
     world
         .advance_to(Tick(PATIENT_ZERO_TICK))
         .expect("infection");
@@ -260,7 +260,7 @@ fn briar_fever_only_spreads_between_co_located_residents() {
 
 #[test]
 fn symptomatic_disease_can_cause_death_once() {
-    let mut world = World::briar_glen(22).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 22).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let location = world.agents[&actor].location;
     let now = world.tick;
@@ -295,7 +295,7 @@ fn symptomatic_disease_can_cause_death_once() {
 
 #[test]
 fn dead_residents_are_excluded_from_observation_and_scheduling() {
-    let mut world = World::briar_glen(21).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 21).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let location = world.agents[&actor].location;
     world.agents.get_mut(&actor).expect("resident").life = LifeState::Dead {

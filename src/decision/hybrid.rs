@@ -124,7 +124,8 @@ mod tests {
         persistence::{load_world, save_world},
         runner::run_simulation,
         sim::{
-            Decision, DecisionSource, IntentionGoal, ObservationTarget, ProposedAction, Tick, World,
+            BRIAR_GLEN, Decision, DecisionSource, IntentionGoal, ObservationTarget, ProposedAction,
+            Tick, World,
         },
     };
     use std::{
@@ -157,7 +158,7 @@ mod tests {
     }
 
     fn observation() -> crate::cognition::AgentObservation {
-        let world = World::briar_glen(1).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         perceive(&world, actor).expect("observation")
     }
@@ -267,7 +268,7 @@ mod tests {
             },
             u8::MAX,
         );
-        let mut world = World::briar_glen(7).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
         let homes = world
             .agents
             .values()
@@ -319,7 +320,7 @@ mod tests {
             fails: false,
         };
         let mut engine = HybridDecisionEngine::new(LocalDecisionEngine::new(7), llm, 2);
-        let mut world = World::briar_glen(7).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
         world.advance_to(Tick(Tick::PER_DAY)).expect("day boundary");
 
         let world = run_simulation(world, Tick::PER_DAY, &mut engine)
@@ -351,7 +352,7 @@ mod tests {
         };
         let mut continuous_engine = run(Arc::new(AtomicUsize::new(0)));
         let continuous = run_simulation(
-            World::briar_glen(11).expect("town"),
+            World::from_spec(BRIAR_GLEN, 11).expect("town"),
             300,
             &mut continuous_engine,
         )
@@ -359,9 +360,13 @@ mod tests {
         .expect("continuous simulation");
 
         let mut first_engine = run(Arc::new(AtomicUsize::new(0)));
-        let first = run_simulation(World::briar_glen(11).expect("town"), 120, &mut first_engine)
-            .await
-            .expect("first simulation");
+        let first = run_simulation(
+            World::from_spec(BRIAR_GLEN, 11).expect("town"),
+            120,
+            &mut first_engine,
+        )
+        .await
+        .expect("first simulation");
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")

@@ -5,7 +5,10 @@
 
 use std::{process::ExitCode, time::Instant};
 use terrarium::{
-    decision::LocalDecisionEngine, report::Report, runner::run_simulation, sim::Tick, sim::World,
+    decision::LocalDecisionEngine,
+    report::Report,
+    runner::run_simulation,
+    sim::{BRIAR_GLEN, Tick, World},
 };
 
 struct Args {
@@ -116,7 +119,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for seed in 0..args.seeds {
-        let world = World::briar_glen(seed)?;
+        let world = World::from_spec(BRIAR_GLEN, seed)?;
         let mut engine = LocalDecisionEngine::new(seed);
         let world = run_simulation(world, ticks, &mut engine).await?;
         let report = Report::from_world(&world);

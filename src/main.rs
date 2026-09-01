@@ -15,7 +15,7 @@ use terrarium::{
     persistence::{load_world, save_world},
     report::Report,
     runner::{LlmDecisionAudit, run_simulation, run_simulation_with_audit},
-    sim::{AgentId, IntentionGoal, Tick, World},
+    sim::{AgentId, BRIAR_GLEN, IntentionGoal, Tick, World},
 };
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
@@ -26,6 +26,7 @@ struct RunArgs {
     ticks: u64,
     database: Option<PathBuf>,
     resume: Option<PathBuf>,
+    town: Option<PathBuf>,
     live: bool,
     llm_log: Option<PathBuf>,
     decision: DecisionArgs,
@@ -48,6 +49,9 @@ enum DecisionArgs {
 }
 
 #[derive(Debug, PartialEq)]
+// ponytail: CLI args parsed once per invocation; the OpenAi payload dwarfs the
+// other variants and no boxing is worth it.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     Run(RunArgs),
     Inspect {
@@ -69,7 +73,7 @@ enum Command {
 #[derive(Debug, Error, PartialEq, Eq)]
 enum CliError {
     #[error(
-        "usage: terrarium run [--seed N | --resume PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH [--report | --chronicle [--all]]\n       terrarium report PATH [--json]\n       terrarium chronicle PATH [--all]"
+        "usage: terrarium run [--seed N | --resume PATH | --town PATH] [--days N | --ticks N] [--database PATH] [--live] [--llm-model MODEL [--llm-url URL] [--llm-api chat|responses] [--llm-api-key-env NAME] [--llm-temperature 0..2] [--llm-reasoning-effort LEVEL] [--llm-max-tokens N] [--llm-provider PROVIDER] [--llm-calls-per-day N] [--llm-log PATH]]\n       terrarium inspect PATH [--report | --chronicle [--all]]\n       terrarium report PATH [--json]\n       terrarium chronicle PATH [--all]"
     )]
     Usage,
     #[error("missing value for {0}")]
@@ -88,6 +92,8 @@ enum CliError {
     MissingLlmModel,
     #[error("--seed cannot be used with --resume")]
     SeedWithResume,
+    #[error("--town cannot be used with --resume")]
+    TownWithResume,
     #[error("environment variable {0} does not contain an API key")]
     MissingApiKey(String),
 }
@@ -154,6 +160,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     let mut ticks = None;
     let mut database = None;
     let mut resume = None;
+    let mut town = None;
     let mut llm_model = None;
     let mut llm_url = None;
     let mut llm_api_key_env = None;
@@ -182,6 +189,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
             "--ticks" => ticks = Some(parse_number(&flag, value)?),
             "--database" => database = Some(value.into()),
             "--resume" => resume = Some(value.into()),
+            "--town" => town = Some(value.into()),
             "--llm-model" => llm_model = Some(value),
             "--llm-log" => llm_log = Some(value.into()),
             "--llm-url" => llm_url = Some(value),
@@ -249,6 +257,9 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
     if seed_was_set && resume.is_some() {
         return Err(CliError::SeedWithResume);
     }
+    if town.is_some() && resume.is_some() {
+        return Err(CliError::TownWithResume);
+    }
     let ticks = match (days, ticks) {
         (Some(days), None) => days
             .checked_mul(Tick::PER_DAY)
@@ -291,6 +302,7 @@ fn parse_run_args(mut args: impl Iterator<Item = String>) -> Result<RunArgs, Cli
         ticks,
         database,
         resume,
+        town,
         live,
         llm_log,
         decision,
@@ -478,13 +490,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ticks,
                 database,
                 resume,
+                town,
                 live,
                 llm_log,
                 decision,
             } = args;
-            let world = match &resume {
-                Some(path) => load_world(path)?,
-                None => World::briar_glen(seed)?,
+            let world = if let Some(path) = &resume {
+                load_world(path)?
+            } else if let Some(path) = &town {
+                let json = std::fs::read_to_string(path).map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("failed to read town file {}: {error}", path.display()),
+                    )
+                })?;
+                World::from_spec(&json, seed)?
+            } else {
+                World::from_spec(BRIAR_GLEN, seed)?
             };
             let world_seed = world.seed;
             let first_event = world.events().len();
@@ -655,6 +677,7 @@ mod tests {
                 ticks: 8_640,
                 database: Some(PathBuf::from("run.sqlite")),
                 resume: None,
+                town: None,
                 live: true,
                 llm_log: None,
                 decision: DecisionArgs::Local,
@@ -752,6 +775,7 @@ mod tests {
                 ticks: 288,
                 database: None,
                 resume: None,
+                town: None,
                 live: false,
                 llm_log: Some(PathBuf::from("decisions.jsonl")),
                 decision: DecisionArgs::OpenAi {
@@ -778,6 +802,7 @@ mod tests {
                 ticks: 10_000,
                 database: None,
                 resume: None,
+                town: None,
                 live: false,
                 llm_log: None,
                 decision: DecisionArgs::Local,
@@ -790,6 +815,7 @@ mod tests {
                 ticks: 10,
                 database: None,
                 resume: Some(PathBuf::from("run.sqlite")),
+                town: None,
                 live: false,
                 llm_log: None,
                 decision: DecisionArgs::Local,
@@ -890,6 +916,53 @@ mod tests {
                 flag: "--llm-calls-per-day".into(),
                 value: "0".into(),
             })
+        );
+    }
+
+    #[test]
+    fn town_flag_is_parsed_and_conflicts_checked() {
+        assert_eq!(
+            parse_args(args(&["run", "--town", "towns/custom.json"])),
+            Ok(Command::Run(RunArgs {
+                seed: 814_921,
+                ticks: Tick::PER_DAY,
+                database: None,
+                resume: None,
+                town: Some(PathBuf::from("towns/custom.json")),
+                live: false,
+                llm_log: None,
+                decision: DecisionArgs::Local,
+            }))
+        );
+        // Missing value for the flag itself.
+        assert_eq!(
+            parse_args(args(&["run", "--town"])),
+            Err(CliError::MissingValue("--town".into()))
+        );
+        // A resumed checkpoint already carries its world.
+        assert_eq!(
+            parse_args(args(&[
+                "run",
+                "--town",
+                "towns/custom.json",
+                "--resume",
+                "run.sqlite"
+            ])),
+            Err(CliError::TownWithResume)
+        );
+        // Default behavior is unchanged: no --town means the built-in town.
+        assert_eq!(
+            parse_args(args(&["run"])),
+            Ok(Command::Run(RunArgs {
+                seed: 814_921,
+                ticks: Tick::PER_DAY,
+                database: None,
+                resume: None,
+                town: None,
+                live: false,
+                llm_log: None,
+                decision: DecisionArgs::Local,
+            }))
         );
     }
 

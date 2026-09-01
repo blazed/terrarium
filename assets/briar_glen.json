@@ -1,0 +1,107 @@
+{
+  "name": "Briar Glen",
+  "locations": [
+    { "name": "The Crooked Lantern", "kind": "other", "business": { "offering": "meal", "price": 5 }, "opening_hours": { "opens_at_hour": 12, "closes_at_hour": 23 } },
+    { "name": "Mara's Bakery", "kind": "other", "business": { "offering": "meal", "price": 5 }, "opening_hours": { "opens_at_hour": 6, "closes_at_hour": 14 } },
+    { "name": "Town Hall", "kind": "other", "business": { "offering": "civic_services", "price": 4 }, "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 18 } },
+    { "name": "General Store", "kind": "other", "business": { "offering": "supplies", "price": 6 }, "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 18 } },
+    { "name": "Old Chapel", "kind": "other", "opening_hours": { "opens_at_hour": 6, "closes_at_hour": 20 } },
+    { "name": "Riverside Houses", "kind": "home" },
+    { "name": "Abandoned Mill", "kind": "other", "business": { "offering": "supplies", "price": 6 }, "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 18 } },
+    { "name": "Carpenter's Workshop", "kind": "other", "business": { "offering": "repairs", "price": 8 }, "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 18 } },
+    { "name": "Briar Glen Clinic", "kind": "other", "business": { "offering": "medicine", "price": 12 }, "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 20 } },
+    { "name": "Jail", "kind": "other", "opening_hours": { "opens_at_hour": 8, "closes_at_hour": 18 } }
+  ],
+  "connections": [
+    ["The Crooked Lantern", "Mara's Bakery"],
+    ["The Crooked Lantern", "Town Hall"],
+    ["The Crooked Lantern", "Riverside Houses"],
+    ["Mara's Bakery", "General Store"],
+    ["Mara's Bakery", "Riverside Houses"],
+    ["Town Hall", "General Store"],
+    ["Town Hall", "Old Chapel"],
+    ["General Store", "Riverside Houses"],
+    ["Old Chapel", "Riverside Houses"],
+    ["Old Chapel", "Abandoned Mill"],
+    ["Riverside Houses", "Abandoned Mill"],
+    ["Riverside Houses", "Carpenter's Workshop"],
+    ["Abandoned Mill", "Carpenter's Workshop"],
+    ["Town Hall", "Briar Glen Clinic"],
+    ["Riverside Houses", "Briar Glen Clinic"],
+    ["Town Hall", "Jail"]
+  ],
+  "residents": [
+    {
+      "name": "Mara Quinn",
+      "age": 41,
+      "occupation": "Baker",
+      "home": "Riverside Houses",
+      "workplace": "Mara's Bakery",
+      "personality": { "openness": { "base": 0.45, "spread": 0.15 }, "agreeableness": { "base": 0.7, "spread": 0.15 }, "neuroticism": { "base": 0.25, "spread": 0.15 }, "honesty": { "base": 0.75, "spread": 0.15 }, "ambition": { "base": 0.4, "spread": 0.15 }, "impulsiveness": { "base": 0.5, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Elias Ward",
+      "age": 46,
+      "occupation": "Carpenter",
+      "home": "Riverside Houses",
+      "workplace": "Carpenter's Workshop",
+      "personality": { "openness": { "base": 0.48, "spread": 0.15 }, "agreeableness": { "base": 0.67, "spread": 0.15 }, "neuroticism": { "base": 0.28, "spread": 0.15 }, "honesty": { "base": 0.735, "spread": 0.15 }, "ambition": { "base": 0.43, "spread": 0.15 }, "impulsiveness": { "base": 0.47, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Alice Vale",
+      "age": 35,
+      "occupation": "Shopkeeper",
+      "home": "Riverside Houses",
+      "workplace": "General Store",
+      "personality": { "openness": { "base": 0.51, "spread": 0.15 }, "agreeableness": { "base": 0.64, "spread": 0.15 }, "neuroticism": { "base": 0.31, "spread": 0.15 }, "honesty": { "base": 0.72, "spread": 0.15 }, "ambition": { "base": 0.46, "spread": 0.15 }, "impulsiveness": { "base": 0.44, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Bob Mercer",
+      "age": 29,
+      "occupation": "Laborer",
+      "home": "Riverside Houses",
+      "workplace": "Abandoned Mill",
+      "personality": { "openness": { "base": 0.53999996, "spread": 0.15 }, "agreeableness": { "base": 0.61, "spread": 0.15 }, "neuroticism": { "base": 0.34, "spread": 0.15 }, "honesty": { "base": 0.705, "spread": 0.15 }, "ambition": { "base": 0.49, "spread": 0.15 }, "impulsiveness": { "base": 0.41, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Clara Voss",
+      "age": 38,
+      "occupation": "Teacher",
+      "home": "Riverside Houses",
+      "workplace": "Town Hall",
+      "personality": { "openness": { "base": 0.57, "spread": 0.15 }, "agreeableness": { "base": 0.58, "spread": 0.15 }, "neuroticism": { "base": 0.37, "spread": 0.15 }, "honesty": { "base": 0.69, "spread": 0.15 }, "ambition": { "base": 0.52, "spread": 0.15 }, "impulsiveness": { "base": 0.38, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Sheriff Hale",
+      "age": 52,
+      "occupation": "Sheriff",
+      "home": "Riverside Houses",
+      "workplace": "Town Hall",
+      "personality": { "openness": { "base": 0.59999996, "spread": 0.15 }, "agreeableness": { "base": 0.55, "spread": 0.15 }, "neuroticism": { "base": 0.39999998, "spread": 0.15 }, "honesty": { "base": 0.675, "spread": 0.15 }, "ambition": { "base": 0.55, "spread": 0.15 }, "impulsiveness": { "base": 0.35000002, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Jonas Reed",
+      "age": 44,
+      "occupation": "Publican",
+      "home": "Riverside Houses",
+      "workplace": "The Crooked Lantern",
+      "personality": { "openness": { "base": 0.63, "spread": 0.15 }, "agreeableness": { "base": 0.52, "spread": 0.15 }, "neuroticism": { "base": 0.43, "spread": 0.15 }, "honesty": { "base": 0.66, "spread": 0.15 }, "ambition": { "base": 0.58, "spread": 0.15 }, "impulsiveness": { "base": 0.32, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    },
+    {
+      "name": "Iris Bell",
+      "age": 27,
+      "occupation": "Doctor",
+      "home": "Riverside Houses",
+      "workplace": "Briar Glen Clinic",
+      "personality": { "openness": { "base": 0.65999997, "spread": 0.15 }, "agreeableness": { "base": 0.49, "spread": 0.15 }, "neuroticism": { "base": 0.45999998, "spread": 0.15 }, "honesty": { "base": 0.645, "spread": 0.15 }, "ambition": { "base": 0.61, "spread": 0.15 }, "impulsiveness": { "base": 0.29000002, "spread": 0.15 } },
+      "needs": { "money": { "base": 0.5, "spread": 0.08 }, "food": { "base": 0.2, "spread": 0.08 }, "companionship": { "base": 0.3, "spread": 0.08 }, "safety": { "base": 0.15, "spread": 0.08 }, "status": { "base": 0.35, "spread": 0.08 }, "energy": { "base": 0.8, "spread": 0.08 } }
+    }
+  ]
+}

@@ -23,7 +23,7 @@ pub use relationship::Relationship;
 pub use scheduler::Scheduler;
 pub use town_event::{TOWN_EVENT_DURATION, TownEvent, TownEventKind};
 pub(crate) use world::event_evidence;
-pub use world::{World, WorldError};
+pub use world::{BRIAR_GLEN, TownSpecError, World, WorldError};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
