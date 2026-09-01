@@ -316,15 +316,16 @@ mod tests {
         cognition::AgentObservation,
         decision::{DecisionEngine, DecisionError, LocalDecisionEngine},
         sim::{
-            Activity, ActivityKind, AgentId, DeathCause, Decision, DialogueTone, EventKind,
-            Intention, IntentionGoal, LifeState, LocationId, ProposedAction, Tick, World,
+            Activity, ActivityKind, AgentId, BRIAR_GLEN, DeathCause, Decision, DialogueTone,
+            EventKind, Intention, IntentionGoal, LifeState, LocationId, ProposedAction, Tick,
+            World,
         },
     };
     use uuid::Uuid;
 
     #[tokio::test]
     async fn simulation_stops_when_every_resident_is_dead() {
-        let mut world = World::briar_glen(1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         for location in world.locations.values_mut() {
             location.agents.clear();
         }
@@ -351,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_runs_are_reproducible_and_exercise_actions() {
-        let left_world = World::briar_glen(1_234).expect("town");
+        let left_world = World::from_spec(BRIAR_GLEN, 1_234).expect("town");
         let right_world = left_world.clone();
         let mut left_engine = LocalDecisionEngine::new(1_234);
         let mut right_engine = LocalDecisionEngine::new(1_234);
@@ -414,7 +415,7 @@ mod tests {
     async fn different_seeds_diverge_within_ten_ticks() {
         let mut signatures = Vec::new();
         for seed in [814_921, 2_643, 4_375, 5_276] {
-            let world = World::briar_glen(seed).expect("town");
+            let world = World::from_spec(BRIAR_GLEN, seed).expect("town");
             let mut engine = LocalDecisionEngine::new(seed);
             let world = run_simulation(world, 10, &mut engine)
                 .await
@@ -443,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn continued_intentions_skip_new_decisions() {
-        let mut world = World::briar_glen(1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         world.advance_to(Tick(12 * 12)).expect("noon");
         let actor = world.agents.values().next().expect("resident").id;
         for resident in world.agents.values_mut() {
@@ -512,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn resident_made_busy_earlier_in_the_tick_does_not_act() {
-        let mut world = World::briar_glen(1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         let mut residents = world.agents.keys().copied();
         let first = residents.next().expect("first resident");
         let second = residents.next().expect("second resident");
@@ -575,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_records_immediate_llm_completion_as_json() {
-        let mut world = World::briar_glen(1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         for agent in world.agents.values_mut() {
             agent.needs.food = 1.0;
             agent.needs.energy = 1.0;
@@ -610,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_records_local_steps_and_urgent_interruptions() {
-        let mut world = World::briar_glen(1).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         for agent in world.agents.values_mut() {
             agent.needs.energy = 0.0;
             agent.needs.food = 1.0;
@@ -679,7 +680,7 @@ mod tests {
 
         let mut rejected_entries = Vec::new();
         let rejected = run_simulation_with_audit(
-            World::briar_glen(2).expect("town"),
+            World::from_spec(BRIAR_GLEN, 2).expect("town"),
             1,
             &mut FixedLlmEngine(LlmChoice::InvalidVisit),
             |_, _| {},
@@ -714,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn decision_failure_falls_back_to_wait() {
-        let world = World::briar_glen(1).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 1).expect("town");
         let world = run_simulation(world, 1, &mut FailingEngine)
             .await
             .expect("simulation");
@@ -723,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn thirty_days_preserve_invariants() {
-        let world = World::briar_glen(1_234).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 1_234).expect("town");
         let start = world.tick.0;
         let mut engine = LocalDecisionEngine::new(1_234);
         let result = run_simulation(world, 30 * 288, &mut engine)

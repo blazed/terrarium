@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn inventory_capacity_and_missing_items_reject_atomically() {
-    let mut world = World::briar_glen(22).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 22).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let meal_business = world
         .locations
@@ -57,7 +57,7 @@ fn inventory_capacity_and_missing_items_reject_atomically() {
 
 #[test]
 fn clinic_sells_medicine_and_provides_paid_treatment() {
-    let mut world = World::briar_glen(31).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 31).expect("town");
     world.advance_to(Tick(8 * 12)).expect("clinic opening");
     let clinic = world.clinic_location().expect("one clinic");
     let actor = *world.agents.keys().next().expect("resident");
@@ -132,7 +132,7 @@ fn clinic_sells_medicine_and_provides_paid_treatment() {
 
 #[test]
 fn treatment_requires_the_clinic_and_a_medical_need() {
-    let mut world = World::briar_glen(32).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 32).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     world.agents.get_mut(&actor).expect("resident").balance = 100;
     assert_eq!(
@@ -162,7 +162,7 @@ fn every_market_offering_transfers_value_and_work_restocks_it() {
         Offering::Medicine,
         Offering::CivicServices,
     ] {
-        let mut world = World::briar_glen(21).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 21).expect("town");
         world.advance_to(Tick(8 * 12)).expect("business hours");
         let location = world
             .locations
@@ -261,7 +261,7 @@ fn every_market_offering_transfers_value_and_work_restocks_it() {
 
 #[test]
 fn events_change_mood_and_time_returns_it_toward_neutral() {
-    let mut world = World::briar_glen(4).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 4).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let location = world.agents[&actor].location;
 
@@ -296,7 +296,7 @@ fn events_change_mood_and_time_returns_it_toward_neutral() {
 
 #[test]
 fn contextual_goals_match_exact_targets_and_refresh() {
-    let mut world = World::briar_glen(4).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 4).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let actor = residents[0];
     let listener = residents[1];
@@ -374,7 +374,7 @@ fn contextual_goals_match_exact_targets_and_refresh() {
 
 #[test]
 fn multi_hop_intentions_continue_and_clear() {
-    let mut world = World::briar_glen(3).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
     world.advance_to(Tick(12 * 12)).expect("noon");
     let actor = *world.agents.keys().next().expect("resident");
     let destination = world
@@ -423,7 +423,7 @@ fn multi_hop_intentions_continue_and_clear() {
 
 #[test]
 fn llm_rest_and_work_intentions_continue_until_a_boundary() {
-    let mut world = World::briar_glen(3).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let home = world.agents[&actor].home;
     world.relocate(actor, home);
@@ -486,7 +486,7 @@ fn llm_rest_and_work_intentions_continue_until_a_boundary() {
 
 #[test]
 fn invalid_and_expired_intentions_clear_safely() {
-    let mut world = World::briar_glen(3).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let unknown = crate::sim::LocationId(Uuid::nil());
     assert!(matches!(

@@ -364,7 +364,7 @@ mod tests {
     use crate::{
         cognition::perceive,
         decision::{DecisionEngine, DecisionError},
-        sim::{ActionResult, ProposedAction, World},
+        sim::{ActionResult, BRIAR_GLEN, ProposedAction, World},
     };
     use std::{
         io::{Read, Write},
@@ -451,7 +451,7 @@ mod tests {
             .expect("response");
         });
 
-        let mut world = World::briar_glen(42).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let observation = perceive(&world, actor).expect("observation");
         let mut engine = OpenAiDecisionEngine::new(
@@ -507,7 +507,7 @@ mod tests {
             .expect("response");
         });
 
-        let world = World::briar_glen(42).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let observation = perceive(&world, actor).expect("observation");
         let mut engine = OpenAiDecisionEngine::new_with_api(
@@ -548,7 +548,7 @@ mod tests {
             write!(stream, "data: [DONE]\n\n").expect("done");
         });
 
-        let world = World::briar_glen(42).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let observation = perceive(&world, actor).expect("observation");
         let mut engine = OpenAiDecisionEngine::new(
@@ -581,7 +581,7 @@ mod tests {
             thread::sleep(Duration::from_millis(120));
         });
 
-        let world = World::briar_glen(42).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let observation = perceive(&world, actor).expect("observation");
         let mut engine = OpenAiDecisionEngine::new(

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn briar_glen_has_consistent_residents() {
-    let world = World::briar_glen(814_921).expect("town should construct");
+    let world = World::from_spec(BRIAR_GLEN, 814_921).expect("town should construct");
     assert_eq!(world.agents.len(), 8);
     assert_eq!(world.locations.len(), 10);
     assert_eq!(
@@ -18,7 +18,7 @@ fn briar_glen_has_consistent_residents() {
 
 #[test]
 fn town_events_start_end_and_change_conditions() {
-    let mut storm = World::briar_glen(0).expect("town");
+    let mut storm = World::from_spec(BRIAR_GLEN, 0).expect("town");
     let home = storm.agents.values().next().expect("resident").home;
     let non_home = storm
         .locations
@@ -65,7 +65,7 @@ fn town_events_start_end_and_change_conditions() {
 
 #[test]
 fn festivals_and_market_conditions_modify_existing_actions() {
-    let mut festival = World::briar_glen(1).expect("town");
+    let mut festival = World::from_spec(BRIAR_GLEN, 1).expect("town");
     let residents = festival.agents.keys().copied().take(2).collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[1];
@@ -102,7 +102,7 @@ fn festivals_and_market_conditions_modify_existing_actions() {
         (2, TownEventKind::Shortage, STOCK_PER_SHIFT / 2),
         (3, TownEventKind::MarketDay, STOCK_PER_SHIFT * 2),
     ] {
-        let mut world = World::briar_glen(seed).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, seed).expect("town");
         let (worker, workplace) = world
             .agents
             .iter()
@@ -123,9 +123,9 @@ fn festivals_and_market_conditions_modify_existing_actions() {
 
 #[test]
 fn goals_are_contextual_and_seeded() {
-    let first = World::briar_glen(11).expect("town");
-    let repeated = World::briar_glen(11).expect("same town");
-    let different = World::briar_glen(12).expect("different town");
+    let first = World::from_spec(BRIAR_GLEN, 11).expect("town");
+    let repeated = World::from_spec(BRIAR_GLEN, 11).expect("same town");
+    let different = World::from_spec(BRIAR_GLEN, 12).expect("different town");
     let goals = |world: &World| {
         world
             .agents
@@ -154,7 +154,7 @@ fn goals_are_contextual_and_seeded() {
 
 #[test]
 fn tick_only_moves_forward() {
-    let mut world = World::briar_glen(1).expect("town should construct");
+    let mut world = World::from_spec(BRIAR_GLEN, 1).expect("town should construct");
     let start = world.tick;
     world.advance_to(Tick(start.0 + 2)).expect("forward tick");
     assert_eq!(
@@ -168,7 +168,7 @@ fn tick_only_moves_forward() {
 
 #[test]
 fn activities_last_until_completion_and_urgent_needs_interrupt_them() {
-    let mut world = World::briar_glen(2).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 2).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let start = world.tick;
     let food_business = world
@@ -217,7 +217,7 @@ fn activities_last_until_completion_and_urgent_needs_interrupt_them() {
 
 #[test]
 fn time_and_successful_actions_update_needs() {
-    let mut world = World::briar_glen(2).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 2).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let actor = residents[0];
     let listener = residents[1];
@@ -275,7 +275,7 @@ fn time_and_successful_actions_update_needs() {
 
 #[test]
 fn work_and_purchases_transfer_coins_and_reject_atomically() {
-    let mut world = World::briar_glen(12).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 12).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let business = world.agents[&actor].workplace.expect("workplace");
     assert!(world.locations[&business].business.is_some());
@@ -386,7 +386,7 @@ fn work_and_purchases_transfer_coins_and_reject_atomically() {
 
 #[test]
 fn mutual_aid_transfers_needed_items_and_rejects_atomically() {
-    let mut world = World::briar_glen(8).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 8).expect("town");
     let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
     let giver = residents[0];
     let receiver = residents[1];

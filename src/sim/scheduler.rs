@@ -18,11 +18,11 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::Scheduler;
-    use crate::sim::{Activity, ActivityKind, Tick, World};
+    use crate::sim::{Activity, ActivityKind, BRIAR_GLEN, Tick, World};
 
     #[test]
     fn busy_residents_do_not_receive_turns() {
-        let mut world = World::briar_glen(22).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 22).expect("town");
         let scheduler = Scheduler;
         let actors = scheduler.agents_to_act(&world);
         let actor = actors[0];
@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn thousands_of_ticks_schedule_reproducibly() {
-        let mut left = World::briar_glen(22).expect("town");
+        let mut left = World::from_spec(BRIAR_GLEN, 22).expect("town");
         let mut right = left.clone();
         let scheduler = Scheduler;
         let mut left_schedule = Vec::new();

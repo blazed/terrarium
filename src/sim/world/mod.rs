@@ -16,11 +16,12 @@ mod execute;
 mod goals;
 mod intention;
 mod social;
+mod spec;
 mod time;
-mod town;
 mod validate;
 
 pub(crate) use social::event_evidence;
+pub use spec::{BRIAR_GLEN, TownSpecError};
 
 const MEMORY_LIMIT: usize = 20;
 const RUMOR_LIMIT: usize = 20;
@@ -33,7 +34,6 @@ const SYMPTOMATIC_TICKS: u64 = 2 * Tick::PER_DAY;
 const RECOVERY_TICKS: u64 = Tick::PER_DAY;
 const IMMUNITY_TICKS: u64 = 3 * Tick::PER_DAY;
 const DISEASE_DAMAGE_PER_TICK: f32 = 0.001;
-const CLINIC_PRICE: u64 = 12;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WorldError {

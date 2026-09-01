@@ -7,8 +7,8 @@ use super::{
     Tick, TownEvent, TownEventKind, World, WorldError,
 };
 use crate::sim::{
-    ActivityKind, BUSINESS_STARTING_CASH, Location, MAX_ITEMS_PER_KIND, STOCK_PER_SHIFT, Scheduler,
-    WORK_WAGE,
+    ActivityKind, BRIAR_GLEN, BUSINESS_STARTING_CASH, Location, MAX_ITEMS_PER_KIND,
+    STOCK_PER_SHIFT, Scheduler, WORK_WAGE,
 };
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -18,4 +18,5 @@ mod economy_goals;
 mod history_health;
 mod movement_social;
 mod social_validation;
+mod spec;
 mod town_time;

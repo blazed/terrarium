@@ -191,7 +191,9 @@ mod tests {
     use crate::{
         decision::LocalDecisionEngine,
         runner::run_simulation,
-        sim::{ActionResult, Intention, IntentionGoal, Item, ProposedAction, Tick, World},
+        sim::{
+            ActionResult, BRIAR_GLEN, Intention, IntentionGoal, Item, ProposedAction, Tick, World,
+        },
     };
     use rusqlite::Connection;
     use std::{env, fs, path::PathBuf};
@@ -204,7 +206,7 @@ mod tests {
     async fn completed_world_round_trips_through_sqlite() {
         let path = test_path("round-trip");
         let _ = fs::remove_file(&path);
-        let world = World::briar_glen(u64::MAX).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, u64::MAX).expect("town");
         let mut engine = LocalDecisionEngine::new(u64::MAX);
         let mut world = run_simulation(world, 50, &mut engine)
             .await
@@ -282,7 +284,7 @@ mod tests {
 
         let mut continuous_engine = LocalDecisionEngine::new(seed);
         let continuous = run_simulation(
-            World::briar_glen(seed).expect("town"),
+            World::from_spec(BRIAR_GLEN, seed).expect("town"),
             900,
             &mut continuous_engine,
         )
@@ -291,7 +293,7 @@ mod tests {
 
         let mut first_engine = LocalDecisionEngine::new(seed);
         let first = run_simulation(
-            World::briar_glen(seed).expect("town"),
+            World::from_spec(BRIAR_GLEN, seed).expect("town"),
             400,
             &mut first_engine,
         )
@@ -314,9 +316,13 @@ mod tests {
         let _ = fs::remove_file(&path);
         let seed = 77;
         let mut engine = LocalDecisionEngine::new(seed);
-        let world = run_simulation(World::briar_glen(seed).expect("town"), 1, &mut engine)
-            .await
-            .expect("run");
+        let world = run_simulation(
+            World::from_spec(BRIAR_GLEN, seed).expect("town"),
+            1,
+            &mut engine,
+        )
+        .await
+        .expect("run");
         save_world(&path, &world).expect("checkpoint");
 
         let connection = Connection::open(&path).expect("database");

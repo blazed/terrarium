@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn work_and_activity_locations_are_authoritative() {
-    let mut world = World::briar_glen(3).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 3).expect("town");
     let actor = *world
         .agents
         .values()
@@ -46,18 +46,26 @@ fn work_and_activity_locations_are_authoritative() {
 #[test]
 fn town_identity_is_seeded() {
     assert_eq!(
-        World::briar_glen(7).expect("town").agents,
-        World::briar_glen(7).expect("town").agents
+        World::from_spec(BRIAR_GLEN, 7).expect("town").agents,
+        World::from_spec(BRIAR_GLEN, 7).expect("town").agents
     );
     assert_ne!(
-        World::briar_glen(7).expect("town").agents.keys().next(),
-        World::briar_glen(8).expect("town").agents.keys().next()
+        World::from_spec(BRIAR_GLEN, 7)
+            .expect("town")
+            .agents
+            .keys()
+            .next(),
+        World::from_spec(BRIAR_GLEN, 8)
+            .expect("town")
+            .agents
+            .keys()
+            .next()
     );
 }
 
 #[test]
 fn closed_locations_reject_entry_and_activity_but_allow_departure() {
-    let mut world = World::briar_glen(5).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 5).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let home = world.agents[&actor].home;
     let tavern = world
@@ -100,7 +108,7 @@ fn closed_locations_reject_entry_and_activity_but_allow_departure() {
 
 #[test]
 fn movement_updates_both_sides_and_records_an_event() {
-    let mut world = World::briar_glen(4).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 4).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let from = world.agents[&actor].location;
     let destination = *world.locations[&from]
@@ -124,7 +132,7 @@ fn movement_updates_both_sides_and_records_an_event() {
 
 #[test]
 fn only_present_agents_remember_a_conversation() {
-    let mut world = World::briar_glen(41).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 41).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let remote = residents[0];
     let speaker = residents[1];
@@ -198,7 +206,7 @@ fn only_present_agents_remember_a_conversation() {
 
 #[test]
 fn conversations_propagate_bounded_degrading_rumors() {
-    let mut world = World::briar_glen(42).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let subject = residents[0];
     let first_listener = residents[2];

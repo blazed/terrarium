@@ -10,6 +10,7 @@ cargo run -- run --seed 814921 --days 7
 cargo run -- run --seed 814921 --ticks 10000
 cargo run -- run --seed 814921 --days 1 --live
 cargo run -- run --seed 814921 --days 7 --database briar-glen.sqlite
+cargo run -- run --town assets/briar_glen.json --seed 42 --days 7
 cargo run -- run --resume briar-glen.sqlite --days 7
 cargo run -- inspect briar-glen.sqlite
 cargo run -- report briar-glen.sqlite
@@ -44,6 +45,29 @@ Each simulated day schedules one deterministic six-hour town event. Storms close
 Residents have bounded health and can become hungry, exhausted, injured, or symptomatic. Critical needs and symptomatic Briar fever reduce health; sustained illness can cause death, which removes a resident from future scheduling while preserving their historical record. Briar fever's deterministic outbreak begins on Day 2 at 08:00: infection incubates for one day, symptoms last two days, recovery lasts one day, and immunity lasts three days. Transmission is evaluated hourly between co-located residents from the seed, tick, and stable resident IDs. Incubation remains private; only symptoms are included in the resident's subjective observations. Disease infection, symptoms, recovery, immunity expiry, and death are persisted as ordered events.
 
 `--llm-model` enables a local-first hybrid engine: deterministic internal AI handles routine needs, travel, work, commerce, health, and existing intentions, while the LLM is reserved for spaced social or cognitive choices. An accepted model response establishes a bounded intention; local AI then performs its travel and follow-up steps without another request. LLM rest continues until energy reaches 80%, work continues for up to three simulated hours, and urgent needs, invalid state, expiry, or town disruption interrupt safely. Summaries report starts, local follow-up steps, completions, and interruptions. The default budget is two LLM attempts per resident per simulated day; override it with positive `--llm-calls-per-day N`. `--llm-log PATH` writes JSONL entries for accepted LLM proposals, their normalized intentions, local continuation actions, and terminal completion or interruption reasons; it excludes prompts, credentials, hidden state, and unrelated local decisions. Budgets, timing, intention telemetry, and cumulative routing counts are checkpointed, and model failures execute the internal proposal instead of wasting the tick on `Wait`. The OpenAI-compatible server defaults to `http://localhost:11434/v1`; override it with `--llm-url`. `--llm-api chat` uses `/chat/completions`; `--llm-api responses` uses `/responses`. Remote endpoints require HTTPS. `--llm-api-key-env` reads a Bearer token from the named environment variable. `--llm-temperature` accepts `0` through `2`, `--llm-reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, and `--llm-max-tokens` limits output. OpenRouter's `--llm-provider` pins one provider and disables provider fallbacks. Requests stream with a 120-second inactivity timeout. Set `RUST_LOG=debug` for detailed tracing.
+
+## Town as data
+
+Towns are authored as JSON. The built-in Briar Glen lives at `assets/briar_glen.json` and
+remains the default when no `--town` is given; it is also the complete schema example.
+Each run can load any other town instead:
+
+```nu
+cargo run -- run --town mytown.json --seed 42
+```
+
+- Location and resident array order determines the seeded, deterministic IDs; every
+  reference (`home`, `workplace`, connections) uses the unique location name, never an
+  index, so reordering cannot silently redirect a reference.
+- `connections` lists each undirected edge once; the loader inserts both runtime
+  directions.
+- The seed controls all IDs and the sampled personality and need values. Each trait is
+  sampled as `(base + uniform(-spread..=spread)).clamp(0, 1)`, so `base ± spread` must
+  stay inside `[0, 1]`.
+- `--town` cannot be combined with `--resume`, because a resumed checkpoint already
+  contains its world.
+- Business cash, stock, revenue, wages, and the other runtime accounting fields are
+  not configurable; they always start from the same fixed constants.
 
 ## Validate
 

@@ -4,7 +4,7 @@ use super::*;
 /// onlooker, everyone else busy, thief at honesty 0 / impulsiveness 0.
 fn success_world() -> (World, AgentId, AgentId, AgentId) {
     for seed in 0..256 {
-        let mut world = World::briar_glen(seed).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, seed).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let thief = residents[0];
         let victim = residents[1];
@@ -36,7 +36,7 @@ fn success_world() -> (World, AgentId, AgentId, AgentId) {
 /// Seed+setup where a theft fails with a 0.05 roll: everyone idle together.
 fn failure_world() -> (World, AgentId, AgentId) {
     for seed in 0..256 {
-        let mut world = World::briar_glen(seed).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, seed).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let thief = residents[0];
         let victim = residents[1];
@@ -336,7 +336,7 @@ fn checkpoint_round_trip_preserves_crime_events_and_history() {
 
 #[test]
 fn assault_injures_victim_and_drops_their_relationship() {
-    let mut world = World::briar_glen(21).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 21).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let attacker = residents[0];
     let victim = residents[1];
@@ -375,7 +375,7 @@ fn assault_injures_victim_and_drops_their_relationship() {
 
 #[test]
 fn unremorseful_attacker_keeps_mood() {
-    let mut world = World::briar_glen(22).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 22).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let attacker = residents[0];
     let victim = residents[1];
@@ -392,7 +392,7 @@ fn unremorseful_attacker_keeps_mood() {
 
 #[test]
 fn assault_witnesses_learn_hostility_about_the_attacker() {
-    let mut world = World::briar_glen(23).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 23).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let attacker = residents[0];
     let victim = residents[1];
@@ -418,7 +418,7 @@ fn assault_witnesses_learn_hostility_about_the_attacker() {
 
 #[test]
 fn assault_rejections_are_atomic() {
-    let mut world = World::briar_glen(24).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 24).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let attacker = residents[0];
     let victim = residents[1];
@@ -446,7 +446,7 @@ fn assault_rejections_are_atomic() {
         ActionResult::Rejected(ActionRejection::AgentDead(victim))
     );
 
-    let mut world = World::briar_glen(25).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 25).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let attacker = residents[0];
     let tavern = world
@@ -472,7 +472,7 @@ fn assault_rejections_are_atomic() {
 
 #[test]
 fn assault_round_trips_and_self_assault_is_rejected_by_history() {
-    let mut world = World::briar_glen(26).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 26).expect("town");
     let attacker = *world.agents.keys().next().expect("resident");
     let victim = *world.agents.keys().nth(1).expect("resident");
     world.execute(attacker, ProposedAction::Attack { target: victim });
@@ -488,7 +488,7 @@ fn assault_round_trips_and_self_assault_is_rejected_by_history() {
     .expect("valid assault round trips");
     assert_eq!(restored.events(), world.events());
 
-    let mut invalid = World::briar_glen(27).expect("town");
+    let mut invalid = World::from_spec(BRIAR_GLEN, 27).expect("town");
     let attacker = *invalid.agents.keys().next().expect("resident");
     invalid.append_event(
         None,
@@ -944,7 +944,7 @@ async fn sheriff_arrests_follow_witnessed_crimes_across_many_seeds() {
     use crate::{decision::LocalDecisionEngine, runner::run_simulation, sim::event_evidence};
     let mut arrests = 0;
     for seed in 0..10 {
-        let world = World::briar_glen(seed).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, seed).expect("town");
         let mut engine = LocalDecisionEngine::new(seed);
         let world = run_simulation(world, 30 * Tick::PER_DAY, &mut engine)
             .await

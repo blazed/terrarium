@@ -792,16 +792,17 @@ fn produced_stock(amount: u32) -> String {
 mod tests {
     use super::{AidAffordance, ObservationError, next_hop, perceive};
     use crate::sim::{
-        ActionResult, Activity, ActivityKind, AgentId, Belief, DialogueTone, DiseaseState,
-        EventKind, HealthCondition, Intention, IntentionGoal, Item, ObservationTarget,
-        OpeningHours, ProposedAction, Relationship, Rumor, Tick, TownEventKind, World,
+        ActionResult, Activity, ActivityKind, AgentId, BRIAR_GLEN, Belief, DialogueTone,
+        DiseaseState, EventKind, HealthCondition, Intention, IntentionGoal, Item,
+        ObservationTarget, OpeningHours, ProposedAction, Relationship, Rumor, Tick, TownEventKind,
+        World,
     };
     use std::collections::BTreeSet;
     use uuid::Uuid;
 
     #[test]
     fn observation_contains_only_local_agents() {
-        let mut world = World::briar_glen(9).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 9).expect("town");
         let hidden = *world.agents.keys().next().expect("resident");
         let from = world.agents[&hidden].location;
         let destination = *world.locations[&from]
@@ -917,7 +918,7 @@ mod tests {
 
     #[test]
     fn observations_show_current_activities_and_exclude_busy_talk_targets() {
-        let mut world = World::briar_glen(12).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 12).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let observer = residents[0];
         let visible = residents[1];
@@ -971,7 +972,7 @@ mod tests {
 
     #[test]
     fn visible_agents_show_only_direct_conversation_recency() {
-        let mut world = World::briar_glen(13).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 13).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let speaker = residents[0];
         let listener = residents[1];
@@ -1012,7 +1013,7 @@ mod tests {
 
     #[test]
     fn observation_exposes_only_the_actors_inventory_and_item_affordances() {
-        let mut world = World::briar_glen(19).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 19).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let inventory = &mut world.agents.get_mut(&actor).expect("resident").inventory;
         inventory.meals = 1;
@@ -1034,7 +1035,7 @@ mod tests {
 
     #[test]
     fn aid_affordances_are_legal_without_exposing_private_needs() {
-        let mut world = World::briar_glen(19).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 19).expect("town");
         let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
         let observer = residents[0];
         let receiver = residents[1];
@@ -1087,7 +1088,7 @@ mod tests {
 
     #[test]
     fn marketplace_visibility_and_routes_respect_balance_and_stock() {
-        let mut world = World::briar_glen(19).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 19).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let business = world
             .locations
@@ -1181,7 +1182,7 @@ mod tests {
 
     #[test]
     fn marketplace_routes_follow_the_need_each_offering_satisfies() {
-        let mut world = World::briar_glen(23).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 23).expect("town");
         world.advance_to(Tick(8 * 12)).expect("business hours");
         let actor = *world.agents.keys().next().expect("resident");
         let home = world.agents[&actor].home;
@@ -1216,7 +1217,7 @@ mod tests {
 
     #[test]
     fn routes_are_deterministic_and_use_only_open_locations() {
-        let mut world = World::briar_glen(12).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 12).expect("town");
         world.tick = Tick(12 * 12);
         let location = |name: &str| {
             world
@@ -1257,7 +1258,7 @@ mod tests {
 
     #[test]
     fn visible_relationships_are_observer_relative() {
-        let mut world = World::briar_glen(12).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 12).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let observer = residents[0];
         let target = residents[2];
@@ -1339,7 +1340,7 @@ mod tests {
 
     #[test]
     fn memories_are_relative_and_do_not_include_unseen_events() {
-        let mut world = World::briar_glen(11).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 11).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let hidden = residents[0];
         let speaker = residents[1];
@@ -1384,7 +1385,7 @@ mod tests {
 
     #[test]
     fn rumors_are_observer_specific_and_name_the_source() {
-        let mut world = World::briar_glen(12).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 12).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let observer = residents[0];
         let source = residents[1];
@@ -1432,7 +1433,7 @@ mod tests {
 
     #[test]
     fn observations_expose_active_town_events_and_storm_closures() {
-        let mut world = World::briar_glen(0).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 0).expect("town");
         world
             .advance_to(Tick(8 * 60 / Tick::MINUTES))
             .expect("storm");
@@ -1453,7 +1454,7 @@ mod tests {
 
     #[test]
     fn observations_expose_only_visible_health_conditions() {
-        let mut world = World::briar_glen(13).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 13).expect("town");
         let observer = *world.agents.keys().next().expect("resident");
         let location = world.agents[&observer].location;
         let visible = world.locations[&location]
@@ -1512,7 +1513,7 @@ mod tests {
 
     #[test]
     fn observation_is_reproducible_and_rejects_unknown_observers() {
-        let world = World::briar_glen(10).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 10).expect("town");
         let observer = *world.agents.keys().next().expect("resident");
         assert_eq!(
             perceive(&world, observer).expect("observation"),

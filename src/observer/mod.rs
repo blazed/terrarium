@@ -558,12 +558,12 @@ mod tests {
     use crate::{
         decision::LocalDecisionEngine,
         runner::run_simulation,
-        sim::{Tick, World},
+        sim::{BRIAR_GLEN, Tick, World},
     };
 
     #[test]
     fn dashboard_renders_active_town_events() {
-        let mut world = World::briar_glen(0).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 0).expect("town");
         world
             .advance_to(Tick(8 * 60 / Tick::MINUTES))
             .expect("storm");
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn dashboard_shows_full_resident_finances_needs_and_inventory() {
-        let mut world = World::briar_glen(9).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 9).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let agent = world.agents.get_mut(&actor).expect("resident");
         let name = agent.name.clone();
@@ -608,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn rendering_is_deterministic_and_readable() {
-        let world = World::briar_glen(42).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let mut engine = LocalDecisionEngine::new(42);
         let world = run_simulation(world, 20, &mut engine)
             .await

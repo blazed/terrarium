@@ -502,7 +502,7 @@ mod tests {
         decision::LocalDecisionEngine,
         persistence::{load_world, save_world},
         runner::run_simulation,
-        sim::World,
+        sim::{BRIAR_GLEN, World},
     };
     use std::{fs, time::SystemTime};
 
@@ -510,9 +510,13 @@ mod tests {
     async fn report_round_trips_and_survives_resume() {
         let seed = 814_921;
         let mut engine = LocalDecisionEngine::new(seed);
-        let world = run_simulation(World::briar_glen(seed).expect("town"), 24, &mut engine)
-            .await
-            .expect("run");
+        let world = run_simulation(
+            World::from_spec(BRIAR_GLEN, seed).expect("town"),
+            24,
+            &mut engine,
+        )
+        .await
+        .expect("run");
         let report = Report::from_world(&world);
 
         for heading in [

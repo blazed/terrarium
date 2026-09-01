@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn confrontations_confirm_deny_and_reject_invalid_claims() {
     fn world_with_rumor(honesty: f32) -> (World, AgentId, AgentId, EventId) {
-        let mut world = World::briar_glen(43).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 43).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let target = residents[0];
         let accuser = residents[2];
@@ -102,7 +102,7 @@ fn confrontations_confirm_deny_and_reject_invalid_claims() {
 
 #[test]
 fn conversations_build_bounded_mutual_relationships() {
-    let mut world = World::briar_glen(42).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
@@ -134,7 +134,7 @@ fn conversations_build_bounded_mutual_relationships() {
 
 #[test]
 fn agreeable_honest_speakers_build_relationships_faster() {
-    let mut warm = World::briar_glen(42).expect("town");
+    let mut warm = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let residents = warm.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
@@ -177,7 +177,7 @@ fn agreeable_honest_speakers_build_relationships_faster() {
 
 #[test]
 fn dialogue_tone_changes_relationship_effects() {
-    let neutral = World::briar_glen(42).expect("town");
+    let neutral = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let residents = neutral.agents.keys().copied().collect::<Vec<_>>();
     let speaker = residents[0];
     let listener = residents[2];
@@ -213,7 +213,7 @@ fn dialogue_tone_changes_relationship_effects() {
 
 #[test]
 fn dialogue_is_trimmed_and_bounded_to_one_printable_line() {
-    let mut world = World::briar_glen(43).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 43).expect("town");
     let residents = world.agents.keys().copied().collect::<Vec<_>>();
     let actor = residents[0];
     let listener = residents[1];
@@ -258,7 +258,7 @@ fn dialogue_is_trimmed_and_bounded_to_one_printable_line() {
 
 #[test]
 fn invalid_relationship_targets_and_self_talk_are_rejected() {
-    let mut world = World::briar_glen(43).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 43).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     assert_eq!(
         world.execute(
@@ -297,7 +297,7 @@ fn invalid_relationship_targets_and_self_talk_are_rejected() {
 
 #[test]
 fn memories_keep_only_the_latest_twenty_events() {
-    let mut world = World::briar_glen(42).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 42).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let location = world.agents[&actor].location;
 
@@ -319,7 +319,7 @@ fn memories_keep_only_the_latest_twenty_events() {
 
 #[test]
 fn rejected_action_changes_only_history_and_actor_mood() {
-    let mut world = World::briar_glen(5).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 5).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let agents_before = world.agents.clone();
     let locations_before = world.locations.clone();
@@ -348,7 +348,7 @@ fn rejected_action_changes_only_history_and_actor_mood() {
 
 #[test]
 fn disconnected_move_is_rejected_without_mutation() {
-    let mut world = World::briar_glen(6).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 6).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let from = world.agents[&actor].location;
     let destination = *world
@@ -371,7 +371,7 @@ fn disconnected_move_is_rejected_without_mutation() {
 
 #[test]
 fn known_but_absent_agent_cannot_be_addressed() {
-    let mut world = World::briar_glen(7).expect("town");
+    let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
     let actor = *world.agents.keys().next().expect("resident");
     let target = *world
         .agents
@@ -407,7 +407,7 @@ fn crime_rumors_spread_louder_than_neutral_gossip() {
     // memory gets a higher shared confidence than a neutral one (crime base 1.0
     // vs 0.9), so the sheriff hears about thefts before ordinary chatter.
     fn shared_confidence(crime: bool) -> f32 {
-        let mut world = World::briar_glen(44).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 44).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let speaker = residents[0];
         let listener = residents[1];

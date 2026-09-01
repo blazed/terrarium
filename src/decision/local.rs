@@ -684,16 +684,16 @@ mod tests {
         cognition::{ConfrontationAffordance, RumorSummary, TownEventObservation, perceive},
         decision::DecisionEngine,
         sim::{
-            ActionResult, Activity, ActivityKind, Belief, DialogueTone, EventId, Goal, GoalKind,
-            GoalTarget, IntentionGoal, Item, Loot, Needs, Occupation, Offering, ProposedAction,
-            Relationship, Tick, World,
+            ActionResult, Activity, ActivityKind, BRIAR_GLEN, Belief, DialogueTone, EventId, Goal,
+            GoalKind, GoalTarget, IntentionGoal, Item, Loot, Needs, Occupation, Offering,
+            ProposedAction, Relationship, Tick, World,
         },
     };
     use uuid::Uuid;
 
     #[tokio::test]
     async fn town_events_drive_shelter_socializing_and_work() {
-        let mut storm = World::briar_glen(0).expect("town");
+        let mut storm = World::from_spec(BRIAR_GLEN, 0).expect("town");
         storm
             .advance_to(Tick(8 * 60 / Tick::MINUTES))
             .expect("storm");
@@ -720,7 +720,7 @@ mod tests {
             ProposedAction::Rest
         );
 
-        let mut festival = World::briar_glen(1).expect("town");
+        let mut festival = World::from_spec(BRIAR_GLEN, 1).expect("town");
         festival
             .advance_to(Tick(9 * 60 / Tick::MINUTES))
             .expect("festival");
@@ -755,7 +755,7 @@ mod tests {
             ProposedAction::Talk { .. }
         ));
 
-        let mut market = World::briar_glen(3).expect("town");
+        let mut market = World::from_spec(BRIAR_GLEN, 3).expect("town");
         market
             .advance_to(Tick(11 * 60 / Tick::MINUTES))
             .expect("market day");
@@ -789,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn inventory_is_used_for_urgent_needs_and_stocked_outside_shortages() {
-        let world = World::briar_glen(17).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 17).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.needs.food = 0.1;
@@ -874,7 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn agreeable_residents_offer_useful_surplus_inventory() {
-        let mut world = World::briar_glen(17).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 17).expect("town");
         let residents = world.agents.keys().copied().take(2).collect::<Vec<_>>();
         let actor = residents[0];
         let receiver = residents[1];
@@ -923,7 +923,7 @@ mod tests {
 
     #[tokio::test]
     async fn confident_beliefs_shape_companion_and_tone() {
-        let world = World::briar_glen(17).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 17).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.needs.food = 0.5;
@@ -976,7 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn credible_rumors_trigger_confrontations() {
-        let world = World::briar_glen(18).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 18).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.needs.food = 0.5;
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn marketplace_choices_follow_the_need_each_offering_satisfies() {
-        let mut world = World::briar_glen(23).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 23).expect("town");
         world.advance_to(Tick(8 * 12)).expect("business hours");
         let actor = *world.agents.keys().next().expect("resident");
         world.agents.get_mut(&actor).expect("resident").balance = 100;
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn routines_follow_multi_hop_route_hints() {
-        let mut world = World::briar_glen(7).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
         let actor = world
             .agents
             .values()
@@ -1097,7 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn urgent_needs_and_time_drive_routines() {
-        let mut world = World::briar_glen(7).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 7).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut engine = LocalDecisionEngine::new(7);
 
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[tokio::test]
     async fn medical_needs_prioritize_medicine_and_clinic_treatment() {
-        let mut world = World::briar_glen(18).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 18).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         world.advance_to(Tick(8 * 12)).expect("clinic opening");
         world.agents.get_mut(&actor).expect("resident").injury = true;
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn low_honesty_broke_resident_steals_and_prefers_occupied_targets() {
-        let world = World::briar_glen(41).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 41).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.personality.honesty = 0.3;
@@ -1386,7 +1386,7 @@ mod tests {
 
     #[tokio::test]
     async fn high_honesty_resident_never_steals() {
-        let world = World::briar_glen(42).expect("town");
+        let world = World::from_spec(BRIAR_GLEN, 42).expect("town");
         let actor = *world.agents.keys().next().expect("resident");
         let mut observation = perceive(&world, actor).expect("observation");
         observation.self_description.personality.honesty = 1.0;
@@ -1415,7 +1415,7 @@ mod tests {
     async fn hostile_resident_attacks_the_believed_target_only() {
         // A low-agreeableness resident in a bad mood attacks the person they
         // hold a confident high-hostility belief about.
-        let mut world = World::briar_glen(43).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 43).expect("town");
         world
             .advance_to(Tick(9 * 60 / Tick::MINUTES))
             .expect("morning");
@@ -1465,7 +1465,7 @@ mod tests {
 
     #[tokio::test]
     async fn sheriff_arrests_on_a_legal_witnessed_claim() {
-        let mut world = World::briar_glen(41).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 41).expect("town");
         let sheriff = world
             .agents
             .values()
@@ -1543,7 +1543,7 @@ mod tests {
         // Find a seed where everything else is blocked: full needs, no goals, no
         // town event, sheriff at work-hour patrol with no legal claims.
         for seed in 0..64u64 {
-            let mut world = World::briar_glen(seed).expect("town");
+            let mut world = World::from_spec(BRIAR_GLEN, seed).expect("town");
             if world.active_town_event.is_some() {
                 continue;
             }
@@ -1592,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn sheriff_does_not_patrol_at_night() {
         for seed in 0..64u64 {
-            let mut world = World::briar_glen(seed).expect("town");
+            let mut world = World::from_spec(BRIAR_GLEN, seed).expect("town");
             let sheriff = world
                 .agents
                 .values()
@@ -1632,7 +1632,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_sheriffs_never_see_arrest_affordances() {
-        let mut world = World::briar_glen(41).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 41).expect("town");
         let civilian = world
             .agents
             .values()
@@ -1664,7 +1664,7 @@ mod tests {
 
     #[tokio::test]
     async fn known_thieves_are_excluded_from_companionship_and_aid() {
-        let mut world = World::briar_glen(45).expect("town");
+        let mut world = World::from_spec(BRIAR_GLEN, 45).expect("town");
         let residents = world.agents.keys().copied().collect::<Vec<_>>();
         let actor = residents[0];
         let thief = residents[1];
